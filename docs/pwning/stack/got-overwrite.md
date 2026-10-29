@@ -374,7 +374,7 @@ Separando, conseguimos entender melhor.
 %19$hhn     → escreve no endereço do 19º argumento
 ```
 
-Lembre-se que **`%hhn` escreve apenas 1 byte (0x00 - 0xff) no endereço apontado** (veja [Format Strings - Tipos de Format Strings](/docs/pwning/format-strings#tipos-de-format-strings)). Assim, estamos escrevendo o endereço de `system@libc` em `printf@got` byte a byte!
+Lembre-se que **`%hhn` escreve apenas 1 byte (0x00 - 0xff) no endereço apontado** (veja [Format Strings - Tipos de Format Strings](./format-strings.md#tipos-de-format-strings)). Assim, estamos escrevendo o endereço de `system@libc` em `printf@got` byte a byte!
 
 Isso evita ter que usar números muito grandes e facilita o processo. Note também que usar `%n` exige que escrevamos os bytes em ordem crescente, já que somente podemos adicionar caracteres à contagem do `%n`, nunca retirar. Se o endereço a ser escrito não estivesse com os bytes em ordem crescente (como `0x000030d6`, `d6` é maior que `30` e `30` é maior que `00` e `00`), bastaria alterar a ordem dos parâmetros (o pwntools faz isso automaticamente).
 

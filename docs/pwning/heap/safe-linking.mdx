@@ -13,7 +13,7 @@ Nas tcache bins e fastbins, chunks livres formam listas simplesmente encadeadas:
 chunk->fd aponta diretamente para o próximo chunk livre
 ```
 
-Isso era vulnerável pois `fd`podia ser sobrescrito, fazendo `malloc()` retornar um endereço arbitrário ([Double Free Attack](/pwning/heap/double-free#passo-a-passo)).
+Isso era vulnerável pois `fd`podia ser sobrescrito, fazendo `malloc()` retornar um endereço arbitrário ([Double Free Attack](./double-free.mdx#passo-a-passo)).
 
 ## Safe Linking
 

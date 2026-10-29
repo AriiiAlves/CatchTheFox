@@ -17,7 +17,7 @@ Como vimos, podemos sobrescrever variáveis com buffer overflow. Mas como podemo
 
 **Curiosidade**: Às vezes você não possui um excedente necessário para fazer Buffer Overflow. Mas, em alguns casos, você pode usar BOF para **modificar a format string** que define o limite de leitura do input. Isso só é possível se a format string estiver na stack (na maioria dos casos ela está em uma região de dados separada, onde há apenas dados constantes, que não são variáveis).
 
-Abaixo, temos alguns binários que ficam para você como lição de casa. Tente resolvê-los e veja o solve caso tenha dificuldade. Os arquivos estão [aqui](./bins_and_solves/04-bof_variable/).
+Abaixo, temos alguns binários que ficam para você como lição de casa. Tente resolvê-los e veja o solve caso tenha dificuldade. Os arquivos estão [aqui](https://github.com/guyinatuxedo/nightmare/tree/master/modules/04-bof_variable), no repositório do Nightmare.
 
 ## [CHALL] csaw18_boi
 

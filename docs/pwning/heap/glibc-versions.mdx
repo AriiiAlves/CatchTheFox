@@ -1,8 +1,9 @@
---- 
+---
 title: Resumo de ataques por versão da glibc
+sidebar_position: 9
 ---
 
-Em ataques à stack é mais fácil identificar o que pode ser feito, pois basta usar `pwndbg ./file` e sabemos o que é ou não possível. Essas informações são fáceis de obter pois as proteções à stack estão no nível de processador (Como NX, apenas tira a permissão de escrita na Stack, e Relro também tem o mesmo conceito). Já ataques contra a heap não são tratados a nível de processador, mas são implementações na `glibc`. Se entendermos o que cada versão da glibc carrega, podemos guiar melhor o ataque a ser feito.
+Em ataques à stack é mais fácil identificar o que pode ser feito, pois basta usar `pwndbg ./file` e sabemos o que é ou não possível. Essas informações são fáceis de obter pois as proteções à stack estão no nível de processador (Como NX, apenas tira a permissão de execução da Stack, e Relro também tem o mesmo conceito). Já ataques contra a heap não são tratados a nível de processador, mas são implementações na `glibc`. Se entendermos o que cada versão da glibc carrega, podemos guiar melhor o ataque a ser feito.
 
 Para identificar a versão da libc de um binário:
 
@@ -16,7 +17,7 @@ strings libc.so.6 | grep "GNU C Library"
 
 ## **Heap Overflow**
 - **Todas as versões**: O conceito básico de overflow continua válido, mas mitigações modernas dificultam a exploração
-- **glibc ≥ 2.3.4**: [Metadata Integrity Checks](/pwning/heap/double-free#size-check-malloc). Overflow precisa manter consistência dos dados (size, prev_size, flags)
+- **glibc ≥ 2.3.4**: [Metadata Integrity Checks](./double-free.mdx#size-check-malloc). Overflow precisa manter consistência dos dados (size, prev_size, flags)
 
 ## **Use After Free (UAF)**
 - **Todas as versões** - Vulnerabilidade de lógica, não da implementação do heap
@@ -24,13 +25,13 @@ strings libc.so.6 | grep "GNU C Library"
 
 ## **Double Free**
 - **glibc < 2.26**: Sem proteções significativas
-- **glibc 2.26-2.31**: [Double-free checks](/pwning/heap/double-free#fasttop-double-free-check) na fastbin
+- **glibc 2.26-2.31**: [Double-free checks](./double-free.mdx#fasttop-double-free-check) na fastbin
 - **glibc ≥ 2.32**: Safe-linking dificulta (mas não impede completamente)
 
 ## **Unlink Attack**
-- **glibc < 2.3.4**: [Unlink clássico](/pwning/heap/unlink) sem verificações
-- **glibc ≥ 2.3.4**: Requer [bypass das verificações](/pwning/heap/unlink#proteção-safe-unlinking-glibc-234) (P->fd->bk == P && P->bk->fd == P)
-- **glibc ≥ 2.26**: [Tcache introduzida](/pwning/heap/tcache), unlink menos relevante para chunks pequenos
+- **glibc < 2.3.4**: [Unlink clássico](./unlink.mdx) sem verificações
+- **glibc ≥ 2.3.4**: Requer [bypass das verificações](./unlink.mdx#proteção-safe-unlinking-glibc-234) (P->fd->bk == P && P->bk->fd == P)
+- **glibc ≥ 2.26**: [Tcache introduzida](./tcache.mdx), unlink menos relevante para chunks pequenos
 - **Prático até ~2.31**: Após isso, outras técnicas são preferíveis
 
 ## **Tcache Poisoning**
@@ -44,7 +45,7 @@ strings libc.so.6 | grep "GNU C Library"
 
 ## **House of Force (Malloc Maleficarum)**
 - **glibc < 2.29**: Sem proteções
-- **glibc ≥ 2.29**: [Top Chunk Integrity Check](/pwning/heap/malloc-maleficarum/house-of-force#top-chunk-integrity-check)
+- **glibc ≥ 2.29**: [Top Chunk Integrity Check](./malloc-maleficarum/house-of-force.mdx#top-chunk-integrity-check)
 - **glibc ≥ 2.32**: Safe-linking, dificulta obter leaks necessários.
 
 ## **House of Spirit**
@@ -62,11 +63,11 @@ strings libc.so.6 | grep "GNU C Library"
 
 ## **Marcos Importantes de Mitigação**
 
-- **glibc 2.3.4 (2005)**: [Unlink hardening](/pwning/heap/unlink#proteção-safe-unlinking-glibc-234), [Metadata Integrity Checks](/pwning/heap/double-free#size-check-malloc)
-- **glibc 2.26 (2017)**: Introdução da [tcache](/pwning/heap/tcache) (mudança massiva), [Double-free checks](/pwning/heap/double-free#fasttop-double-free-check) na fastbin
+- **glibc 2.3.4 (2005)**: [Unlink hardening](./unlink.mdx#proteção-safe-unlinking-glibc-234), [Metadata Integrity Checks](./double-free.mdx#size-check-malloc)
+- **glibc 2.26 (2017)**: Introdução da [tcache](./tcache.mdx) (mudança massiva), [Double-free checks](./double-free.mdx#fasttop-double-free-check) na fastbin
 - **glibc 2.27 (2018)**: Tcache double-free check, Tcache size checks
 - **glibc 2.29 (2018)**: Tcache key (mitigação de double-free aprimorada - adicionou campo key nos chunks)
-- **glibc 2.29 (2019)**: [Top Chunk Integrity Check](/pwning/heap/malloc-maleficarum/house-of-force#top-chunk-integrity-check)
+- **glibc 2.29 (2019)**: [Top Chunk Integrity Check](./malloc-maleficarum/house-of-force.mdx#top-chunk-integrity-check)
 - **glibc 2.32 (2020)**: **Safe-linking** (XOR encoding em fd pointers)
 - **glibc 2.34 (2021)**: Remoção de malloc hooks (`__malloc_hook`, `__free_hook`, `__realloc_hook` removidos), mudanças estruturais internas.
 
@@ -74,6 +75,6 @@ strings libc.so.6 | grep "GNU C Library"
 
 **Versões antigas (< 2.26)**: Praticamente **todos os ataques clássicos funcionam**
 
-**Versões médias (2.26-2.31)**: [Tcache poisoning](/pwning/heap/tcache#tcache-poisoning) lidera, ataques clássicos requerem adaptação
+**Versões médias (2.26-2.31)**: [Tcache poisoning](./tcache.mdx#tcache-poisoning) lidera, ataques clássicos requerem adaptação
 
 **Versões modernas (≥ 2.32)**: Safe-linking requer leaks de heap, mas exploits ainda são possíveis

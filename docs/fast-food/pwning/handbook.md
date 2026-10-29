@@ -1,3 +1,9 @@
+---
+title: "Pwning Handbook"
+sidebar_position: 5
+unlisted: true
+---
+
 # 1. Introdução
 
 Este material é um handbook com os "macetes" para fazer pwning de forma prática.

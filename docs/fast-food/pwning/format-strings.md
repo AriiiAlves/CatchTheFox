@@ -1,8 +1,8 @@
 ---
 title: "Format Strings"
 sidebar_position: 4
+unlisted: true
 ---
-
 Exploração de printf ou sprintf que aceitam a entrada do usuário diretamente como string de formato (`%s`, `%x`, `%n`). Permite vazar endereço ou escrever GOT/variáveis.
 
 ## printf

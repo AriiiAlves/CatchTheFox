@@ -11,11 +11,11 @@ O `tcache` age como um `fastbin`: uma lista encadeada simples de chunks livres d
 
 ## Tcache Poisoning
 
-Fazer Tcache Poisoning é o mesmo ataque [Double Free](/pwning/heap/double-free) que vimos, mas aplicado ao `tcache`, não à `fastbin`.
+Fazer Tcache Poisoning é o mesmo ataque [Double Free](./double-free.mdx) que vimos, mas aplicado ao `tcache`, não à `fastbin`.
 
 ## Libc-Leak com Tcache
 
-Em [malloc consolidate](/pwning/heap/malloc_consolidate), falamos um pouco sobre fazer um chunk cair propositalmente na `unsorted bin`, de modo que `fd` desse chunk aponta para a `libc`. Bom, nosso objetivo ao atacar o tcache será fazer o chunk cair na `unsorted bin`
+Em [malloc consolidate](./malloc-consolidate.mdx), falamos um pouco sobre fazer um chunk cair propositalmente na `unsorted bin`, de modo que `fd` desse chunk aponta para a `libc`. Bom, nosso objetivo ao atacar o tcache será fazer o chunk cair na `unsorted bin`
 
 Quando o `tcache` está cheio para um tamanho específico, o chunk liberado vai ser alocado para uma das bins. O limite máximo de chunk aceito pela fast bin é de `160 bytes`. Porém, a `glibc` limita o tamanho máximo para `128 bytes` usando a variável global `global_max_fast` por padrão (caso queira ler mais: [Open Euler - Glibc Malloc Source Code Analisis](https://www.openeuler.org/en/blog/wangshuo/Glibc_Malloc_Source_Code_Analysis_(1).html)). 
 

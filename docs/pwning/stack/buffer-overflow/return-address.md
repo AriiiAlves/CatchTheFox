@@ -67,7 +67,7 @@ Ou você pode verificar o endereço da próxima instrução ao PUSH RBP no decom
 
 ### 2° - ROP com ret
 
-Essa técnica é mais confiável e robusta. **[ROP (Return Oriented Programming)](/docs/pwning/rop/8-1-rop) é uma técnica de exploração que usa pedaços de códigos já existentes no programa (gadgets) para executar código malicioso**. 
+Essa técnica é mais confiável e robusta. **[ROP (Return Oriented Programming)](../rop/index.mdx) é uma técnica de exploração que usa pedaços de códigos já existentes no programa (gadgets) para executar código malicioso**. 
 
 Basicamente, vamos **achar o endereço na memória de uma instrução** `ret`, um **gadget**. Isso só é possível **se a proteção PIE/ASLR não estiver ativada** (randomização de memória),
 

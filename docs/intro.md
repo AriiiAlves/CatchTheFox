@@ -1,10 +1,15 @@
 ---
 slug: /
 title: CatchTheFox
-description: Manual de técnicas de pwning e exploit development para CTFs em Português-BR.
+description: CatchTheFox é um manual em português de engenharia reversa, pwning e exploração de binários para CTFs, do assembly básico a buffer overflow, ROP e heap exploitation.
+keywords: [catchthefox, catch the fox, engenharia reversa, pwning, exploração de binários, ctf, português]
 image: /img/logo.png
 sidebar_position: 1
 ---
+
+<head>
+  <title>CatchTheFox | Manual de Engenharia Reversa e Pwning em Português</title>
+</head>
 
 Este guia foi projetado para ser um manual o mais completo possível acerca de Engenharia Reversa e Pwning. Ele está todo em Português-BR.
 

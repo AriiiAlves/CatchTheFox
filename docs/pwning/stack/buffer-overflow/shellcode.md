@@ -25,7 +25,7 @@ A razão pela qual Shellcode funciona é por que **o computador não diferencia 
 Podemos escrever várias coisas em assembly que são úteis como código injetável. Entre elas, temos:
 
 1. **Syscall (Linux/Unix)** - O mais comum. Fazemos chamadas diretas ao kernel via instrução `syscall / int 0x80`. É simples, não depende de bibliotecas específicas e permite acessar todas as funcionalidades do Kernel.
-2. **[ROP (Return-Oriented Programming)](/docs/pwning/rop/8-1-rop)** - Reutilizar códigos do próprio programa encadeados para ação maliciosa
+2. **[ROP (Return-Oriented Programming)](../rop/index.mdx)** - Reutilizar códigos do próprio programa encadeados para ação maliciosa
 3. **Chamada de API Windows** - Usamos as APIs do SO Windows ao invés de syscalls, pois as syscalls do Windows não são públicas.
 4. **Exploração de Browser** - JavaScript/WebAssembly que explora vulnerabilidades no renderizador. Tende a ser bem complexo, pois explora bugs no motor do JS.
 
@@ -280,7 +280,7 @@ File Stealer
 
 ### Outras Syscalls
 
-Para ver cada syscall, seu código, parâmetros e o que faz, recomendo olhar a [Tabela de Syscalls para kernel Linux](/docs/extra/syscall-tb).
+Para ver cada syscall, seu código, parâmetros e o que faz, recomendo olhar a [Tabela de Syscalls para kernel Linux](../../../extra/syscall-table.mdx).
 
 Outros materiais também estão disponíveis na internet:
 
@@ -401,7 +401,7 @@ Podemos ver que o código de saída é 10, como esperado.
 
 O pwntools possui a ferramenta `shellcraft`, que tem shellcodes prontos para uso. **O shellcode dado vai estar em assembly** e **temos que transformar em bytes** usando a função `asm()`.
 
-O shellcraft possui inúmeros shellcodes prontos. Se quiser, veja [Principais Funções Shellcraft](/docs/extra/shellcraft-li). Abaixo, temos alguns shellcodes populares.
+O shellcraft possui inúmeros shellcodes prontos. Se quiser, veja [Principais Funções Shellcraft](../../../extra/shellcraft.mdx). Abaixo, temos alguns shellcodes populares.
 
 ```py
 # Shellcodes prontos populares
