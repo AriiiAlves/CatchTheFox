@@ -1,0 +1,120 @@
+---
+title: "Proteções de binários"
+sidebar_position: 1
+---
+
+Os arquivos binários possuem, por padrão, algumas proteções ativadas que dificultam bastante a exploração de vulnerabilidades. É importante saber quais são e o que fazem, pois há ataques que não são possíveis dependendo da proteção, ou ficam muito mais difíceis. Apesar disso, há modos de contornar cada uma.
+
+## Verificando as proteções de um arquivo
+
+Instale o `checksec` de uma das formas abaixo:
+
+1. `sudo apt install checksec`
+2. `sudo pip install pwntools` (se der o erro de "This environment is externally managed", use `sudo pip install --break-system-packages pwntools`, ou, de forma mais segura, instale dentro de um ambiente virtual do Python)
+
+Verifique um binário com `pwn checksec ./arquivo` (pwntools) ou `checksec --file=./arquivo` (pacote do apt). Este comando retorna uma info das proteções do binário, como abaixo.
+
+<div style={{textAlign: 'center'}}>
+    ![Protections](/docs-img/bin-protections.png)
+</div>
+
+**Arch** indica a arquitetura do arquivo. `i386` é a família/modelo do processador (processadores Intel de 32 bits), `32` indica que os endereços possuem 32 bits (`x86`), `little` indica o [Endianness](../introduction/endianness.mdx), ou seja, little-endian.
+
+**Stripped** é o quanto dos símbolos originais foram perdidos, melhor explicado no módulo [Debugging com GDB](../introduction/gdb.md#compilando-sem--g--stripped).
+
+Os outros são as proteções que veremos a seguir.
+
+## RELRO (Relocation Read-Only)
+
+**Funcionamento**
+
+Controla as permissões de escrita em tabelas de dados que contêm ponteiros para funções externas: principalmente o GOT (Global Offset Table), além de outras seções como `.init_array`, `.fini_array` e `.dynamic`. (O PLT, Procedure Linkage Table, é código e já é somente leitura de qualquer forma.)
+
+- **Partial RELRO**: Apenas algumas partes são protegidas; o GOT é escrito após a resolução de funções (LAZY BINDING) e permanece gravável.
+- **Full RELRO**: Todas as relocations são processadas na inicialização (EAGER BINDING). Após a inicialização, todo o GOT se torna somente leitura (read-only).
+
+**Efeito**
+
+Impede ataques que visam modificar ponteiros em áreas de relocação, como o GOT (Global Offset Table).
+
+**Contorno**
+
+- **Partial RELRO**: Permite Lazy Binding, o GOT é gravável (rw) porque é atualizado em tempo de execução quando uma função externa é chamada pela primeira vez. Ele continua gravável durante toda a execução, então basta **sobrescrever a entrada do GOT da função a ser explorada antes da chamada que queremos sequestrar** (veja [GOT Overwrite](./stack/got-overwrite.md)).
+- **Full RELRO**: Extremamente difícil ou impossível modificar o GOT diretamente. O ataque deve focar em técnicas que não envolvam a escrita no GOT.
+
+## Stack Canary/SSP (Stack-Smashing Protector)
+
+**Funcionamento**
+
+1. O compilador insere um valor aleatório de 4 ou 8 bytes (o Canary) no Stack Frame da função, imediatamente antes do endereço de retorno salvo.
+2. O valor do Canary é armazenado em uma área de memória separada (no Linux, na TLS - Thread Local Storage, acessada via `fs:0x28` em x64 e `gs:0x14` em x86).
+3. **Antes de a função retornar**, o código gerado pelo compilador verifica se o Canary na Stack corresponde ao valor armazenado.
+4. Se a verificação falhar, o programa aborta o processo (chamando a `__stack_chk_fail`, que mostra a mensagem `*** stack smashing detected ***`).
+
+No Linux, o byte menos significativo do Canary é sempre `0x00`. Isso impede que funções de string, como `puts` e `printf("%s")`, leiam o Canary sem querer (o `\0` encerra a string), e também que funções como `strcpy` o sobrescrevam por inteiro.
+
+**Efeito**
+
+Impede sobrescrita do `return address` na stack. **Eficaz contra Buffer Overflow**.
+
+**Contorno**
+
+**Vazar o Canary** (o valor aleatório de verificação do Stack Canary, com Format Strings, por exemplo), **mantendo o valor que ele usa como verificação na stack ao fazer o padding no Buffer Overflow**. Em servidores que fazem `fork()` a cada conexão, o Canary é o mesmo em todos os processos filhos, então também é possível descobri-lo por força bruta, byte a byte. Ou sobrescrever ponteiros de função na Heap (Heap Overflow) ou em áreas não protegidas pelo Canary.
+
+## NX (No-Execute) ou DEP (Data Execution Prevention)
+
+**Funcionamento**
+
+Recurso de hardware (CPU) e software (SO). Um bit na entrada da tabela de páginas de memória (`Page Table Entry - PTE`) é marcado. Se o bit NX estiver ativado (1), **o processador não permitirá a busca e execução de instruções nessa página de memória, mesmo que o código tente saltar para lá**.
+
+**Efeito**
+
+Impede que áreas da memória que deveriam conter apenas dados sejam executadas. **Eficaz contra injeção de Shellcode na Stack/Heap**.
+
+**Contorno**: Usar ROP (Return-Oriented Programming) ou JOP (Jump-Oriented Programming), que reutilizam código do próprio programa, estes estando em áreas com permissão de execução. 
+
+## PIE (Position-Independent Executable) + ASLR (Address Space Layout Randomization)
+
+**Funcionamento**
+
+Na inicialização do processo, o sistema operacional carrega a base do executável, bibliotecas compartilhadas (como `libc`), a Stack e a Heap em **endereços de memória aleatórios e diferentes a cada execução**.
+
+Enquanto o PIE é uma característica do binário, definida ao compilar (`-pie` ou `-no-pie` no gcc), o ASLR é uma configuração do Kernel/Sistema Operacional (afeta os endereços da `libc`, da Stack e da Heap). O código do próprio executável só é carregado em um endereço aleatório se o binário for PIE: **sem PIE, os endereços do binário (funções, GOT, etc.) são sempre os mesmos, mesmo com o ASLR ativado**.
+
+**Efeito**
+
+Endereços do executável randomizados toda vez que ele roda. Mesmo que você tenha o executável, os endereços que você obtiver serão inúteis na máquina alvo, onde você tem apenas um `input` e mais nada.
+
+**Contorno**
+
+Vazar endereços (Format strings, Array Indexing, etc). A randomização muda apenas o endereço **base** de cada região: a distância (offset) entre as coisas dentro de uma mesma região continua igual. Então, ao vazar um único endereço da libc, por exemplo, conseguimos calcular a base da libc e o endereço de qualquer função dela. Outra opção é o [Partial Overwrite](./stack/rop/partial-overwrite.mdx).
+
+## Fortify Source
+
+Recurso do compilador (GCC/Clang) em conjunto com a glibc, que substitui chamadas a funções C inseguras (strcpy, memcpy, snprintf) por versões mais seguras (como `__strcpy_chk`) em tempo de compilação. Essas versões verificam, durante a execução, se o tamanho de destino fornecido pelo programador é excedido e, se houver um estouro, encerram o programa. Essa proteção é aplicada na compilação de código C/C++ (com a flag `-D_FORTIFY_SOURCE=2` e otimização ativada, como `-O2`).
+
+**Efeito**
+
+Ajuda a evitar alguns Buffer Overflows simples, mas apenas se o compilador conseguir determinar o tamanho do buffer de destino.
+
+Também atrapalha ataques de [Format Strings](./stack/format-strings.md): a versão protegida do `printf` não aceita `%n` em format strings que estão em memória gravável, e não aceita acessos posicionais (como `%7$x`) que pulem argumentos.
+
+## IBT (Indirect Branch Tracking)
+
+O IBT (Indirect Branch Tracking) é uma proteção de hardware (parte do Intel CET - Control-flow Enforcement Technology) contra ataques de redirecionamento de fluxo de execução. Visa prevenir ataques JOP (Jump-Oriented Programming) e COP (Call-Oriented Programming). Contra ROP, a outra parte do CET é o **Shadow Stack**, uma cópia protegida dos endereços de retorno que é comparada a cada `ret`.
+
+Com IBT, temos duas novas instruções: `endbr32` (32-bit) e `endbr64` (64 bit)
+
+Essas instruções são NOPs que não fazem nada durante a execução normal, mas são verificadas pelo hardware quando ocorre um salto indireto (`jmp` ou `call`).
+
+Assim, o compilador insere ENDBR no início de funções, destinos de ponteiros de função, etc (destinos válidos!). Se um `jmp` ou `call` não leva o RIP até um ENDBR primeiro, ocorre uma falha e o programa encerra.
+
+**Efeito**
+
+Quando ativado, limita bastante as aplicações práticas de JOP. Porém, o IBT não verifica o `ret`, então sozinho não impede ROP (esse é o papel do Shadow Stack).
+
+Na prática, no Linux, o IBT geralmente ainda não é aplicado a programas comuns (user space). Por isso, em CTFs, as instruções `endbr64` aparecem nos binários, mas normalmente não têm efeito nenhum.
+
+**Contorno**
+
+Usar gadgets que começam com ENDBR (destino válido).

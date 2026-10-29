@@ -1,0 +1,173 @@
+---
+title: Principais Funções Shellcraft
+sidebar_position: 2
+---
+
+## Shell
+
+```py
+# Shell
+shellcraft.sh()                    # /bin/sh
+shellcraft.dupsh()                 # Duplica shell para stdin/stdout
+shellcraft.dupsh('rbp')            # Duplica shell para fd específico
+shellcraft.findsock()              # Encontra socket aberto
+shellcraft.findpeersh()            # Encontra peer shell (socket conectado)
+shellcraft.findpeersh('rbp')       # Com registro específico
+```
+
+## Redes e sockets
+
+```py
+# Redes e sockets
+## Conexão
+shellcraft.connect('ip', port)
+shellcraft.connect('ip', port, 'af')    # Família de endereços
+
+## Bind shell
+shellcraft.bindsh(port)
+shellcraft.bindsh(port, 'af')           # Família de endereços
+shellcraft.bindshell(port)              # Alternativa
+
+## Reverse shell
+shellcraft.reverse('ip', port)
+shellcraft.reverse('ip', port, 'af')
+
+## Listener/Server
+shellcraft.listen(port)
+shellcraft.listen(port, 'af')
+
+## Socket operations
+shellcraft.sockopen()                   # Abre socket
+shellcraft.sockconnect()                # Conecta socket
+shellcraft.sockbind()                   # Bind socket
+shellcraft.socklisten()                 # Listen socket
+shellcraft.sockaccept()                 # Accept conexão
+shellcraft.sockdup()                    # Duplica socket
+shellcraft.socksend()                   # Envia dados
+shellcraft.sockrecv()                   # Recebe dados
+```
+
+## Arquivos
+
+```py
+## Operações com arquivos
+shellcraft.cat('filename')           # Lê arquivo
+shellcraft.cat('filename', fd)       # Lê para fd específico
+shellcraft.open('filename')          # Abre arquivo
+shellcraft.openat('filename')        # Openat syscall
+shellcraft.read(fd, size)            # Lê de fd
+shellcraft.write(fd, 'data')         # Escreve em fd
+shellcraft.close(fd)                 # Fecha fd
+
+## Diretórios
+shellcraft.getdents(fd)              # Lista diretório
+shellcraft.getdents64(fd)            # Lista diretório (64-bit)
+shellcraft.getcwd()                  # Diretório atual
+shellcraft.chdir('path')             # Muda diretório
+
+## Manipulação de arquivos
+shellcraft.unlink('filename')        # Remove arquivo
+shellcraft.rename('old', 'new')      # Renomeia arquivo
+shellcraft.symlink('target', 'link') # Cria symlink
+shellcraft.link('old', 'new')        # Cria hard link
+```
+
+## Processos
+```py
+## Controle de processos
+shellcraft.fork()                    # Fork processo
+shellcraft.vfork()                   # vfork
+shellcraft.clone()                   # Clone processo
+shellcraft.execve('path', ['args'])  # Executa programa
+shellcraft.execveat('path', ['args']) # Execveat
+
+## Sair/terminar
+shellcraft.exit()                    # Sai normalmente
+shellcraft.exit(status)              # Sai com status
+shellcraft.kill(pid, sig)            # Mata processo
+shellcraft.tkill(tid, sig)           # Mata thread
+```
+
+## Sistema
+```py
+## Informações do sistema
+shellcraft.syscall()                 # Chama syscall arbitrária
+shellcraft.getpid()                  # PID atual
+shellcraft.getppid()                 # PID do pai
+shellcraft.getuid()                  # UID real
+shellcraft.geteuid()                 # UID efetivo
+shellcraft.getgid()                  # GID real
+shellcraft.getegid()                 # GID efetivo
+shellcraft.uname()                   # Informações do kernel
+
+## Time/Sleep
+shellcraft.sleep(seconds)            # Dorme por segundos
+shellcraft.nanosleep(seconds, nanos) # Dorme com nanosegundos
+shellcraft.alarm(seconds)            # Configura alarme
+```
+
+## Memória e mapeamento
+```py
+## Alocação de memória
+shellcraft.mmap(addr, size, prot, flags)  # Mapeia memória
+shellcraft.munmap(addr, size)             # Desmapeia memória
+shellcraft.mprotect(addr, size, prot)     # Proteção de memória
+shellcraft.brk(addr)                      # Ajusta break heap
+
+## Stack operations
+shellcraft.push(value)                    # Empurra valor na stack
+shellcraft.pushstr('string')              # Empurra string
+shellcraft.pushstr_array(['str1', 'str2']) # Array de strings
+shellcraft.pusharray([1, 2, 3])           # Array de valores
+
+# I/O e redirecionamento
+## Duplicação de file descriptors
+shellcraft.dup(fd)                       # Duplica fd
+shellcraft.dup2(old, new)                # Duplica para fd específico
+shellcraft.dup3(old, new, flags)         # Dup3 com flags
+
+## Pipes
+shellcraft.pipe()                        # Cria pipe
+shellcraft.pipe2(flags)                  # Pipe2 com flags
+
+## Terminal/PTY
+shellcraft.openpty()                     # Abre pseudo-terminal
+shellcraft.login_pty()                   # Login via PTY
+```
+
+## Específicos da arquitetura
+```py
+shellcraft.i386.mov('eax', 0xdeadbeef)   # Move valor
+shellcraft.amd64.syscall()               # Syscall específica
+shellcraft.arm.mov('r0', 0x1234)         # ARM
+shellcraft.aarch64.mov('x0', 0x1234)     # AArch64
+shellcraft.mips.mov('$a0', 0x1234)       # MIPS
+shellcraft.riscv.mv('a0', 0x1234)        # RISC-V
+```
+
+## Modificadores e flags
+```py
+# Ajustar shellcodes
+shellcraft.setregs({'rax': 1, 'rbx': 2}) # Define registradores
+shellcraft.fixup()                       # Corrige offsets
+
+# Encoders
+shellcraft.encoder(shellcode)           # Codifica shellcode
+shellcraft.avoid(bytes)                 # Evita bytes específicos
+```
+
+## Outros
+```py
+shellcraft.echo('text')                  # Imprime texto
+shellcraft.trap()                        # Instrução trap/debug
+shellcraft.int3()                        # Breakpoint (int 3)
+shellcraft.ud2()                         # Instrução undefined
+shellcraft.nop()                         # No operation
+shellcraft.ret()                         # Return
+shellcraft.infloop()                     # Loop infinito
+
+# Shellcodes compostos
+shellcraft.stager(url, size)             # Download e executa
+shellcraft.download(url, path)           # Download arquivo
+shellcraft.wget(url)                     # WGET-like
+```

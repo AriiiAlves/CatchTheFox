@@ -1,10 +1,14 @@
 ---
 title: Radare2 (r2) (Todo)
---- 
+sidebar_position: 6
+unlisted: true
+---
 
-Radare2 é um framework avançado de código aberto para análise de binários. Sua interface é via linha de comando. É uma alternativa ao gdb.
+Radare2 é um framework avançado de código aberto para análise de binários. Sua interface é via linha de comando. É uma alternativa ao gdb (e também a disassemblers como o Ghidra e o IDA, já que faz análise estática e dinâmica).
 
 Instale com: `sudo apt-get install radare2`
+
+(A versão dos repositórios do apt costuma ser bem antiga. O projeto recomenda instalar pelo [repositório oficial](https://github.com/radareorg/radare2): `git clone https://github.com/radareorg/radare2 && radare2/sys/install.sh`.)
 
 ## Conceitos básicos
 
@@ -23,10 +27,13 @@ r2 -d /caminho/para/binario
 
 ### Comandos
 
+Dica: quase todo comando aceita `?` no final para mostrar a ajuda dele (ex: `a?`, `pd?`). Adicionar `j` no final costuma mostrar a saída em JSON, e `~` funciona como um grep (ex: `afl~main`).
+
 Navegação:
 
 - `?` - Ajuda geral
 - `?*` - Lista todos os comandos
+- `s main` - Vai (seek) para a função main
 - `q` - Sair
 
 Informação:
@@ -39,56 +46,59 @@ Informação:
 
 Modos de visualização:
 
-- `V` - Entra no modo visual
-- `Vp` - Modo de gráfico (gráfico de funções)
-- `VV` - Modo visual interativo
+- `V` - Entra no modo visual (use `p`/`P` para alternar entre as visualizações)
+- `VV` - Modo de grafo (gráfico da função atual)
+- `V!` - Modo visual com painéis
 
 ### Análise estática
+
+Antes de tudo, rode `aaa` para analisar o binário. Sem isso, comandos como `afl` e `pdf` não vão encontrar as funções.
 
 Desmontagem
 
 - `pd` - Desmontar no endereço atual
 - `pd 20` - Desmontar 20 instruções
 - `pdf` - Desmontar função atual
-- `@ main` - Ir para a função main
-- `pd @ main` - Desmontar função main
+- `pdf @ main` - Desmontar função main (o `@` executa o comando em outro endereço, sem mudar a posição atual)
 
 Análise de funções
 
+- `aaa` - Analisa todo o binário (funções, referências, etc.)
 - `afl` - Listar todas as funções
 - `afll` - Listar funções com detalhes
-- `afvn` - Renomear variáveis locais
+- `afvn` - Renomear variáveis locais (`afvn novo_nome nome_antigo`)
 
 Análise de Strings
 
 - `izz` - Extrair todas as Strings
-- `izzq`  - Strings com formato JSON
-- `/z flag` - Buscar strings específicas
+- `izzj`  - Strings em formato JSON
+- `/ flag` - Buscar a string "flag" na memória
+- `izz~flag` - Filtrar as strings que contêm "flag"
 
 Cross-references
 
-- `ax` - Lsitar referências
-- `axf` - Referências a funções
-- `axt @ sym.main` - Referências para main
+- `ax` - Listar referências
+- `axf` - Referências a partir do endereço atual (from)
+- `axt @ sym.main` - Referências para main (to)
 
 Análise de seções
 
 - `iS` - Listar seções
-- `iS` - Seções em JSON
+- `iSj` - Seções em JSON
 
 ### Análise dinâmica
 
-Iniciar depuração: `r2 -d ./binario`. Ou dentro do binário: `doo` (reabrir em modo depuração) ou `ood` (reabrir com argumentos)
+Iniciar depuração: `r2 -d ./binario`. Ou dentro do binário: `ood` (reabrir em modo depuração; aceita argumentos, como `ood arg1 arg2`). `doo` é um atalho para o mesmo comando.
 
 Controle de execução
 
 - `db` - Listar breakpoints
 - `db 0x8048450` - Definir breakpoints
-- `db - 0x8048450` - Remover breakpoint
+- `db -0x8048450` - Remover breakpoint
 - `dc` - Continuar execução
-- `ds` - Step (passo a passo)
+- `dcu main` - Continuar até um endereço (ex: até a main)
+- `ds` - Step (passo a passo, entrando em funções - step into)
 - `dso` - Step over (executa função sem entrar nela)
-- `dsi` - Step into (entra dentro da função/sub-rotina)
 
 Inspeção de memória
 

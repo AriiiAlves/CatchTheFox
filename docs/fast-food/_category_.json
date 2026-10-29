@@ -1,8 +1,4 @@
 {
   "label": "Fast Food",
-  "position": 4,
-  "link": {
-    "type": "generated-index",
-    "description": "Bem vindo ao Fast Food! Você pediu 2 binários e um Segmentation Faults pra acompanhar? Não? Sinto muito, é tudo o que temos. Boa sorte, and good pwning."
-  }
+  "position": 5
 }

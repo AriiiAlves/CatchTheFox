@@ -1,0 +1,80 @@
+---
+title: "Classes e Objetos"
+sidebar_position: 1
+---
+
+Classes são "blueprints" de um objeto. Elas não são inseridas no binário, mas servem como uma estrutura de dados com:
+
+- Variáveis
+- Construtor
+- Métodos
+
+Quando uma classe é instanciada, ela é denotada como um objeto.
+
+As variáveis de um objeto podem ser públicas ou privadas.
+
+- *públicas* - Podem ser acessadas fora da classe
+- *privadas* - Somente podem ser acessadas por métodos da classe
+
+O construtor é o que inicializa as variáveis do objeto. Ele recebe parâmetros e realiza a inicialização.
+
+Os métodos são as funções internas da classe. Elas possuem acesso somente às variáveis da classe
+
+== Instanciando uma classe
+
+Observe uma classe simples:
+
+```
+class Ex1
+{
+	int var1;
+
+public:
+	int var2 = 2;
+	int var3 = 3;
+
+	Ex1() {
+		var1 = 1;
+		cout << "In Constructor" << endl;
+	}
+	int get_var1() {
+		return var1;
+	}
+};
+
+```
+
+- Variável privada: `var1`
+- Variáveis públicas: `var2`, `var3`
+- Construtor: `Ex1()`
+- Métodos: `get_var1()`
+
+Existem duas maneiras de instanciar um objeto. A primeira coloca as variáveis do objeto na stack:
+
+```
+int main() {
+	
+	int a = 0;
+    Ex1 e;
+	Ex1 *e;
+	a = e.get_var1();
+	e.var2 = 99;
+	e.var3 = 98;
+}
+```
+
+A segunda coloca as variáveis do objeto na heap:
+
+```
+int main() {
+	
+	int a = 0;
+	Ex1 *e = new Ex1();
+	a = e->get_var1();
+	e->var2 = 99;
+	e->var3 = 98;
+	delete(e);
+}
+```
+
+Ao colocar na heap, `e` é um ponteiro para o local das variáveis.

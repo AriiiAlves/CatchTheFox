@@ -1,5 +1,6 @@
 ---
 title: The House of Force
+sidebar_position: 1
 ---
 
 House of Force é uma técnica de exploração de heap que permite **alocar um chunk em um endereço arbitrário ao corromper o top chunk**. O ataque **manipula o campo size do top chunk** para enganar o malloc e fazer ele acreditar que há espaço suficiente para qualquer alocação.

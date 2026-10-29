@@ -1,5 +1,6 @@
 ---
 title: Tcache (End Tcache Keys)
+sidebar_position: 6
 ---
 
 A partir da [glibc 2.26](https://elixir.bootlin.com/glibc/glibc-2.26/source/malloc/malloc.c), um novo tipo de bin foi adicionado: o `tcache` (thread cache). Ele foi criado para substituir as `fastbins` e `smallbins`, que agora somente são usadas se o `tcache` estiver desabilitado, indisponível ou cheio. O `tcache` foi desenvolvido para melhorar a performance do malloc, e sua operação é simples: todo tamanho de chunk (até no máximo 0x410) possui seu próprio **tcache bin**, que pode armazenar no máximo 7 chunks. Se o tcache ficar cheio, o próximo chunk a ser adicionado vai ser tratado normalmente e vai para o `fastbin` ou `unsorted bin` (para ser realocado depois para `smallbin` e `largebin`).
