@@ -89,3 +89,47 @@
 - Fortify: "C/Python/Outro" -> C/C++ (Python não) [conceitual]; checagem é em runtime; efeito em %n / %N$ [complemento]
 - IBT: faz parte do CET; protege JOP/COP, não ROP (ret) -> Shadow Stack; "limita 99% de ROP" errado; não aplicado em user space no Linux [conceitual]
 - typos: processoador, "Impede com que", "um configuração"
+
+---
+
+# V2 - Revisão didática (introduction e reversing)
+
+Escopo: apenas `docs/introduction/` e `docs/reversing/`. As pastas `pwning/` e `fast-food/` não foram abertas.
+Todas as páginas revisadas ganharam uma seção **Referências** (links conferidos; o da Intel só bloqueia robôs).
+
+## Pulado (tema delicado, revisar manualmente)
+- `introduction/assembly/coding-assembly.mdx` - escrita de assembly (shellcode, syscalls). Só recebeu as correções da V1.
+- `introduction/pwntools.md` - contém script de exploit. Só recebeu as correções da V1.
+
+## reversing/cpp/classes.mdx
+- Código não compilava (`Ex1 e;` e `Ex1 *e;` no mesmo escopo; faltava `#include <iostream>`) -> corrigido.
+- Título `== Instanciando` (AsciiDoc) -> `##`.
+- "Métodos têm acesso somente às variáveis da classe" -> errado (acessam globais, parâmetros etc.); corrigido para "têm acesso às variáveis do objeto, inclusive as privadas" [conceitual].
+- Nova seção "Como isso aparece no binário": layout do objeto (offsets), ponteiro `this` no `rdi` (e `ecx` no MSVC 32-bit), `new` = `operator new` + construtor, `delete`, name mangling e `c++filt`. Tudo conferido compilando o exemplo com g++.
+## reversing/cpp/index.md
+- Estava vazio -> introdução curta da seção + pré-requisitos.
+
+## introduction/index.md
+- "Ordem sugerida" de leitura com links; referências (origem do termo pwn, Nightmare).
+## endianness.mdx
+- Exemplo com `0xdeadbeef` + `to_bytes` no Python; leitura de endereço no GDB; nota: strings NÃO são invertidas (só números).
+## ghidra.md
+- Instalação simplificada (JDK pelo apt); Program Tree = seções; atalhos de referências (Ctrl+Shift+F), comentário (;) e Defined Strings.
+## ida-pro.mdx
+- `r` "converte para ASCII" -> mostra o valor como caractere; + atalhos `x` (xrefs), `g` (goto), `h` (hex/dec); comentário no disassembly (`;`/`:`).
+## radare2.mdx
+- Só referências.
+## assembly/index.mdx
+- Sub-registradores (eax é parte do rax; escrever em 32 bits zera a metade de cima em x64); "preservado em chamadas" explicado.
+- Flags mais importantes destacadas (ZF, SF, CF, OF).
+- Nova seção Sintaxe Intel vs AT&T (+ `set disassembly-flavor intel`).
+- Nova instrução `test`; tabela de jumps condicionais (com/sem sinal).
+## assembly/stack.mdx
+- Prólogo/epílogo nomeados e explicados.
+## assembly/analise-pratica.mdx
+- Explica o código de alinhamento da stack da main 32-bit, o padding (`xchg ax,ax`/`nop`) e o argumento do puts pela stack.
+- Link do kablaa apontava para um arquivo específico -> pasta dos desafios; dica de comparar com o Ghidra.
+## gdb.md
+- Nota: o console mostrado é do GEF (pwndbg/gdb puro diferem).
+- Variáveis globais: .data/.bss já vêm prontas, só as dependentes de código são inicializadas antes da main [conceitual].
+- ASLR é aplicado pelo kernel antes do _start [conceitual]; dica `bt`.

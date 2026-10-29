@@ -5,7 +5,9 @@ sidebar_position: 2
 
 Começaremos com alguns problemas básicos de Engenharia Reversa de Assembly.
 
-Os problemas são do repositório: [kablaa-CTF-Workshop](https://github.com/kablaa/CTF-Workshop/blob/master/Reversing/Challenges/IfThen/if_then).
+Os problemas são do repositório: [kablaa-CTF-Workshop](https://github.com/kablaa/CTF-Workshop/tree/master/Reversing/Challenges).
+
+Para ver o assembly, usamos o `objdump` com `-M intel` (sintaxe Intel, a mesma usada no restante do guia).
 
 ## Hello World
 
@@ -50,7 +52,11 @@ push   0x80484b0
 call   80482d0 <puts@plt>
 ```
 
-O `puts` é uma função que imprime algo no terminal como texto. O resto não é nada muito interessante. Assim, sabemos que algo será impresso na saída do programa. Se executarmos o código:
+O `puts` é uma função que imprime algo no terminal como texto. O resto não é nada muito interessante:
+
+- As três primeiras instruções (`lea ecx,[esp+0x4]`, `and esp,0xfffffff0` e `push DWORD PTR [ecx-0x4]`) e o `lea esp,[ecx-0x4]` do final apenas **alinham a stack** em 16 bytes. Esse padrão aparece na `main` de muitos binários 32-bit, e pode ser ignorado.
+- As instruções `xchg ax,ax` e `nop` depois do `ret` não fazem nada: são só preenchimento (*padding*) até o início da próxima função.
+- O `push 0x80484b0` é o argumento do `puts`: em 32-bit, os argumentos vão pela stack. `0x80484b0` é o endereço da string. Assim, sabemos que algo será impresso na saída do programa. Se executarmos o código:
 
 ```
 $    ./hello_world
@@ -212,3 +218,11 @@ Quando rodamos o binário, vemos que isso é verdade:
 $    ./loop
 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19
 ```
+
+Dica: abra os mesmos binários no [Ghidra](../ghidra.md) e compare o código decompilado com o assembly que analisamos. Isso ajuda muito a treinar o "olho" para reconhecer `if`s e loops.
+
+## Referências
+
+- [Nightmare - Reversing Assembly](https://guyinatuxedo.github.io/01-intro_assembly/reversing_assembly/index.html) - Análise original destes três binários, em que esta página se baseia.
+- [kablaa - CTF-Workshop](https://github.com/kablaa/CTF-Workshop/tree/master/Reversing/Challenges) - Repositório de origem dos binários.
+- [objdump (GNU Binutils)](https://sourceware.org/binutils/docs/binutils/objdump.html) - Documentação do `objdump`.

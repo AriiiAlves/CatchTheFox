@@ -143,6 +143,8 @@ gef➤
 
 O console de debug se divide em abas. Veremos o que cada uma mostra de informação.
 
+(Este é o console do GEF. O pwndbg mostra as mesmas informações, com nomes e layout um pouco diferentes: `REGISTERS`, `DISASM`, `STACK` e `BACKTRACE`. O `gdb` puro não mostra nada disso automaticamente: você precisa pedir cada informação com comandos como `info registers` e `x`.)
+
 #### Registers
 
 Aqui podemos ver o conteúdo dos registradores da CPU. Eles serão usados o tempo inteiro.
@@ -449,7 +451,18 @@ Os códigos não começam direto na função `main`, que é a primeira que o pro
     - Inicializar variáveis globais da libc
     - Setup de localization (locale)
 2. **Processamento de argumentos** (do kernel para main, por exemplo)
-3. **Inicialização de variáveis globais** (fora da `main`)
+3. **Inicialização de variáveis globais** (fora da `main`). As que têm valor fixo já vêm prontas na seção `.data` do binário, e as não inicializadas (`.bss`) começam zeradas. Só as que dependem de código (como objetos C++) são inicializadas aqui
 4. **Construtores de objetos C++**
 5. **Alinhamento e Setup da Stack**
-6. **Segurança e ASLR** - Há algumas proteções que dificultam a vida dos ganeshers como nós. Aprenderemos elas mais para frente.
+6. **Segurança e ASLR** - Há algumas proteções que dificultam a vida dos ganeshers como nós. Aprenderemos elas mais para frente. (O ASLR, em particular, é aplicado pelo kernel ao carregar o programa, antes mesmo do `_start`.)
+
+No GDB, você pode ver esse caminho com o comando `bt` (backtrace) quando estiver parado dentro da `main`.
+
+## Referências
+
+- [Manual oficial do GDB](https://sourceware.org/gdb/current/onlinedocs/gdb/) - Documentação completa. Veja a seção [Examining Memory](https://sourceware.org/gdb/current/onlinedocs/gdb/Memory.html) para todos os formatos do comando `x`.
+- [GEF - Documentação](https://hugsy.github.io/gef/) - Instalação e comandos do GEF.
+- [pwndbg](https://pwndbg.re/) - Instalação e comandos do pwndbg.
+- [Nightmare - gdb-gef](https://guyinatuxedo.github.io/02-intro_tooling/gdb-gef/index.html) - Introdução ao GDB/GEF em que esta página se baseia (o exemplo do `hello_world` vem de lá).
+- [elf(5) - Linux manual page](https://man7.org/linux/man-pages/man5/elf.5.html) - Formato ELF: seções como `.symtab`, `.dynsym` e `.strtab`, e o entry point.
+- [`__libc_start_main` (Linux Standard Base)](https://refspecs.linuxbase.org/LSB_3.1.1/LSB-Core-generic/LSB-Core-generic/baselib---libc-start-main-.html) - A função da libc que prepara o ambiente e chama a `main`.

@@ -3,7 +3,7 @@ title: "Classes e Objetos"
 sidebar_position: 1
 unlisted: true
 ---
-Classes são "blueprints" de um objeto. Elas não são inseridas no binário, mas servem como uma estrutura de dados com:
+Classes são "blueprints" de um objeto. Elas não existem como uma estrutura própria no binário (o processador não sabe o que é uma classe), mas servem como uma estrutura de dados com:
 
 - Variáveis
 - Construtor
@@ -11,20 +11,23 @@ Classes são "blueprints" de um objeto. Elas não são inseridas no binário, ma
 
 Quando uma classe é instanciada, ela é denotada como um objeto.
 
-As variáveis de um objeto podem ser públicas ou privadas.
+As variáveis de um objeto podem ser públicas ou privadas (em uma `class`, tudo é privado por padrão).
 
 - *públicas* - Podem ser acessadas fora da classe
 - *privadas* - Somente podem ser acessadas por métodos da classe
 
 O construtor é o que inicializa as variáveis do objeto. Ele recebe parâmetros e realiza a inicialização.
 
-Os métodos são as funções internas da classe. Elas possuem acesso somente às variáveis da classe
+Os métodos são as funções internas da classe. Eles têm acesso às variáveis do objeto, inclusive as privadas.
 
-== Instanciando uma classe
+## Instanciando uma classe
 
 Observe uma classe simples:
 
-```
+```cpp
+#include <iostream>
+using namespace std;
+
 class Ex1
 {
 	int var1;
@@ -41,7 +44,6 @@ public:
 		return var1;
 	}
 };
-
 ```
 
 - Variável privada: `var1`
@@ -51,12 +53,10 @@ public:
 
 Existem duas maneiras de instanciar um objeto. A primeira coloca as variáveis do objeto na stack:
 
-```
+```cpp
 int main() {
-	
 	int a = 0;
-    Ex1 e;
-	Ex1 *e;
+	Ex1 e;
 	a = e.get_var1();
 	e.var2 = 99;
 	e.var3 = 98;
@@ -65,16 +65,95 @@ int main() {
 
 A segunda coloca as variáveis do objeto na heap:
 
-```
+```cpp
 int main() {
-	
 	int a = 0;
 	Ex1 *e = new Ex1();
 	a = e->get_var1();
 	e->var2 = 99;
 	e->var3 = 98;
-	delete(e);
+	delete e;
 }
 ```
 
 Ao colocar na heap, `e` é um ponteiro para o local das variáveis.
+
+## Como isso aparece no binário
+
+Os trechos abaixo são do exemplo acima, compilado com `g++ -O0 -no-pie` em x86-64 Linux e visto com `objdump -d -M intel`.
+
+### O objeto é só um bloco de memória
+
+No binário, um objeto é apenas suas variáveis, uma depois da outra, na ordem em que foram declaradas (como uma `struct` do C). Os métodos **não** ficam dentro do objeto: são funções normais, que existem uma única vez no binário.
+
+| Campo  | Offset | Tamanho |
+|--------|--------|---------|
+| `var1` | `+0x0` | 4 bytes |
+| `var2` | `+0x4` | 4 bytes |
+| `var3` | `+0x8` | 4 bytes |
+
+Total: 12 bytes (`0xc`). Por isso, ao ver acessos como `[rax+0x4]` e `[rax+0x8]` partindo de um mesmo ponteiro, provavelmente estamos olhando campos de um objeto.
+
+(Se a classe tiver métodos `virtual`, o compilador também coloca no início do objeto um ponteiro escondido para a *vtable*, uma tabela com os endereços desses métodos.)
+
+### O ponteiro `this`
+
+Todo método recebe, escondido, um primeiro argumento: o ponteiro `this`, que é o endereço do objeto. Em x86-64 no Linux, ele vai no `rdi`, como qualquer primeiro argumento:
+
+```nasm
+; a = e.get_var1();   (objeto na stack, em rbp-0x34)
+lea    rax,[rbp-0x34]       ; endereço do objeto
+mov    rdi,rax              ; this = &e
+call   _ZN3Ex18get_var1Ev   ; Ex1::get_var1()
+```
+
+E dentro do método, `var1` é simplesmente o que está em `this+0`:
+
+```nasm
+_ZN3Ex18get_var1Ev:
+mov    QWORD PTR [rbp-0x8],rdi   ; guarda this
+mov    rax,QWORD PTR [rbp-0x8]
+mov    eax,DWORD PTR [rax]       ; return this->var1  (offset 0)
+```
+
+No Windows (MSVC) em 32 bits, o `this` é passado no `ecx` (convenção *thiscall*).
+
+### `new` e `delete`
+
+`new Ex1()` vira duas etapas: alocar memória com o `operator new` (que usa o `malloc` por baixo) e chamar o construtor passando esse endereço como `this`:
+
+```nasm
+mov    edi,0xc              ; 12 bytes = tamanho do objeto
+call   _Znwm@plt            ; operator new(12)
+mov    rbx,rax              ; rbx = endereço na heap
+mov    rdi,rbx              ; this = endereço alocado
+call   _ZN3Ex1C1Ev          ; Ex1::Ex1() (construtor)
+```
+
+O `delete e` vira uma chamada a `_ZdlPvm` (`operator delete`). Se a classe tivesse um destrutor, ele seria chamado antes.
+
+### Nomes "mangled"
+
+Em C++, várias funções podem ter o mesmo nome (sobrecarga, classes diferentes...). Para diferenciá-las, o compilador codifica no símbolo a classe, o nome e os tipos dos parâmetros, o chamado *name mangling*:
+
+| Símbolo no binário | Significado |
+|--------------------|-------------|
+| `_ZN3Ex18get_var1Ev` | `Ex1::get_var1()` |
+| `_ZN3Ex1C1Ev` | `Ex1::Ex1()` (construtor) |
+| `_Znwm` | `operator new(unsigned long)` |
+
+Para traduzir, use o `c++filt`:
+
+```bash
+$ echo _ZN3Ex18get_var1Ev | c++filt
+Ex1::get_var1()
+```
+
+O Ghidra e o IDA já fazem essa tradução automaticamente.
+
+## Referências
+
+- [cppreference - Classes](https://en.cppreference.com/w/cpp/language/classes) - Definição de classes, membros e controle de acesso.
+- [Itanium C++ ABI](https://itanium-cxx-abi.github.io/cxx-abi/abi.html) - Padrão usado pelo GCC e Clang no Linux: layout de objetos, vtables e name mangling.
+- [Microsoft - Convenções de chamada (`__thiscall`)](https://learn.microsoft.com/en-us/cpp/cpp/thiscall) - Como o `this` é passado no MSVC.
+- [c++filt (GNU Binutils)](https://sourceware.org/binutils/docs/binutils/c_002b_002bfilt.html) - Ferramenta para traduzir nomes mangled.

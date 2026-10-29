@@ -14,3 +14,24 @@ Endianness é a ordem em que os bytes são transmitidos em uma comunicação de 
 </div>
 
 Quando for fazer inserções na memória via inputs no programa (como veremos mais para frente), verifique primeiro o arquivo com `file arquivo` e veja se está em Little-endian ou Big-endian (o `file` mostra `LSB` para Little-endian e `MSB` para Big-endian). Dependendo de como estiver, você terá que mudar a ordem dos bytes inseridos.
+
+## Exemplo
+
+Em um binário x86-64 (little-endian), se o programa compara uma variável com `0xdeadbeef`, os bytes que precisam estar na memória são `ef be ad de`. Você pode conferir no Python:
+
+```py
+>>> (0xdeadbeef).to_bytes(4, 'little')
+b'\xef\xbe\xad\xde'
+>>> (0xdeadbeef).to_bytes(4, 'big')
+b'\xde\xad\xbe\xef'
+```
+
+O mesmo vale para a leitura: ao olhar a memória no GDB, um valor de 8 bytes como `0x00007ffff7a2d830` aparece byte a byte como `30 d8 a2 f7 ff 7f 00 00`. (No [Pwntools](./pwntools.md), as funções `p32`/`p64` fazem essa conversão para você.)
+
+Note que a ordem invertida vale para **números** (inteiros e endereços). Strings são guardadas na ordem em que são escritas: `"ABCD"` fica `41 42 43 44` na memória.
+
+## Referências
+
+- [Endianness - Wikipedia](https://en.wikipedia.org/wiki/Endianness) - Definição, exemplos e histórico.
+- [Intel® 64 and IA-32 Architectures Software Developer's Manual](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html) - Volume 1, seção 1.3.1 (*Bit and Byte Order*): processadores x86 são little-endian.
+- [RFC 1700 - Assigned Numbers](https://www.rfc-editor.org/rfc/rfc1700) - Seção *Data Notations*: protocolos da Internet usam big-endian (*network byte order*).
