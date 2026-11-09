@@ -11,8 +11,8 @@
 <meta name="apple-mobile-web-app-title" content="CatchTheFox">
 <meta name="application-name" content="CatchTheFox">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"CatchTheFox","alternateName":["Catch The Fox","CatchTheFox - Engenharia Reversa e Pwning"],"url":"https://ariiialves.github.io/CatchTheFox/","inLanguage":"pt-BR","description":"Manual em português de engenharia reversa, pwning e exploração de binários para CTFs."}</script><link rel="stylesheet" href="/CatchTheFox/assets/css/styles.8f87cd7f.css">
-<script src="/CatchTheFox/assets/js/runtime~main.ab05dfe6.js" defer="defer"></script>
-<script src="/CatchTheFox/assets/js/main.aceb6006.js" defer="defer"></script>
+<script src="/CatchTheFox/assets/js/runtime~main.3c2cae36.js" defer="defer"></script>
+<script src="/CatchTheFox/assets/js/main.e8145a99.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
 <svg style="display: none;"><defs>
@@ -43,15 +43,19 @@
 <li class=""><code>add</code> - <strong>Adiciona dois valores</strong> e armazena no primeiro operando.</li>
 <li class=""><code>sub</code> - <strong>Subtrai o segundo operando do primeiro</strong> e armazena no primeiro.</li>
 <li class=""><code>xor</code> - <strong>Faz o xor nos dois argumentos</strong>, e armazena no primeiro operando. and e or são semelhantes.</li>
-<li class=""><code>push</code> - <strong>Cresce a stack em 8 ou 4 bytes</strong> (para x64, ou 4 para x86), <strong>depois</strong> <strong>adiciona o conteúdo do registrador para o topo da stack.</strong></li>
-<li class=""><code>pop</code> - Tira 8 bytes do topo da stack e armazena no argumento. Depois encolhe a stack.</li>
+<li class=""><code>push</code> - <strong>Cresce a stack em 8 bytes</strong> (x64) ou 4 (x86), <strong>depois</strong> <strong>adiciona o conteúdo do registrador para o topo da stack.</strong> (<code>sub rsp, 8; mov [rsp], rax</code>)</li>
+<li class=""><code>pop</code> - Tira 8 bytes do topo da stack e armazena no argumento. Depois encolhe a stack. (<code>mov rax, [rsp]; add rsp, 8</code>)</li>
 <li class=""><code>jmp</code> - <strong>Pula para um endereço de instrução</strong>. Redireciona a execução do código.</li>
 <li class=""><code>call</code> - Redução dos comandos <code>push RIP</code> e <code>jmp function</code>. Utilizado sempre que se chama uma função.</li>
-<li class=""><code>ret</code> - Redução do comando <code>pop RIP</code> (desempilha topo da stack para voltar para a execução de código antes da chamada de função, e atribui o valor do pop ao RIP).</li>
+<li class=""><code>leave</code> - Redução de <code>mov rsp, rbp; pop rbp</code> (desfaz o stack frame). Vem antes do <code>ret</code>.</li>
+<li class=""><code>ret</code> - Redução do comando <code>pop RIP</code> (desempilha topo da stack para voltar para a execução de código antes da chamada de função, e atribui o valor do pop ao RIP). <strong>É o que o Buffer Overflow sequestra.</strong></li>
 <li class=""><code>cmp</code> - <strong>Compara dois operandos, faz o primeiro menos o segundo e checa se o resultado é maior/menor/igual a zero</strong>. Dependendo do valor, <strong>define uma flag</strong> de acordo.</li>
-<li class=""><code>jnz/jz</code> -  (jump if not zero/jump if zero) Similar ao jmp. Mas apenas <strong>executa dependendo do status da zero flag</strong>. Existem outros jumps.</li>
+<li class=""><code>test</code> - <strong>AND entre os operandos</strong>, só define flags. <code>test eax, eax</code> + <code>je</code> = &quot;se eax == 0&quot;.</li>
+<li class=""><code>jnz/jz</code> -  (jump if not zero/jump if zero) Similar ao jmp. Mas apenas <strong>executa dependendo do status da zero flag</strong>. Outros: <code>je/jne</code> (igual/diferente), <code>jg/jl/jge/jle</code> (comparação <strong>com sinal</strong>), <code>ja/jb/jae/jbe</code> (comparação <strong>sem sinal</strong>: o tipo do jump revela se a variável era <code>int</code> ou <code>unsigned</code>).</li>
 </ul>
 </li>
+<li class=""><strong>Convenção de chamada (Linux x64)</strong> - Argumentos em <code>rdi, rsi, rdx, rcx, r8, r9</code> (7º em diante na stack), retorno em <code>rax</code>. <strong>Syscalls</strong>: número em <code>rax</code>, argumentos em <code>rdi, rsi, rdx, r10, r8, r9</code>, instrução <code>syscall</code>. Em x86 (32 bits): argumentos de função na stack (<code>[ebp+8]</code>, <code>[ebp+12]</code>...), syscalls com número em <code>eax</code>, argumentos em <code>ebx, ecx, edx</code> e <code>int 0x80</code>.</li>
+<li class=""><strong>Stack frame</strong> - Prólogo <code>push rbp; mov rbp, rsp; sub rsp, N</code>. Variáveis locais em <code>[rbp-X]</code>, RBP salvo em <code>[rbp]</code>, <strong>return address em <code>[rbp+8]</code></strong> (<code>[ebp+4]</code> em 32 bits).</li>
 </ul></div></article><nav class="docusaurus-mt-lg pagination-nav" aria-label="Páginas de documento"><a class="pagination-nav__link pagination-nav__link--prev" href="/CatchTheFox/fast-food/"><div class="pagination-nav__sublabel">Anterior</div><div class="pagination-nav__label">Fast Food</div></a><a class="pagination-nav__link pagination-nav__link--next" href="/CatchTheFox/fast-food/introduction/endianness/"><div class="pagination-nav__sublabel">Próxima</div><div class="pagination-nav__label">Endianness</div></a></nav></div></div></div></div></main></div></div></div><footer class="theme-layout-footer footer footer--dark"><div class="container container-fluid"><div class="row footer__links"><div class="theme-layout-footer-column col footer__col"><div class="footer__title">Aprenda</div><ul class="footer__items clean-list"><li class="footer__item"><a class="footer__link-item" href="/CatchTheFox/">Guia</a></li></ul></div><div class="theme-layout-footer-column col footer__col"><div class="footer__title">Comunidade</div><ul class="footer__items clean-list"><li class="footer__item"><a href="https://discord.gg/pFSq368vu7" target="_blank" rel="noopener noreferrer" class="footer__link-item">Discord<svg width="13.5" height="13.5" aria-label="(opens in new tab)" class="iconExternalLink_nPIU"><use href="#theme-svg-external-link"></use></svg></a></li></ul></div><div class="theme-layout-footer-column col footer__col"><div class="footer__title">Mais</div><ul class="footer__items clean-list"><li class="footer__item"><a href="https://github.com/AriiiAlves/CatchTheFox" target="_blank" rel="noopener noreferrer" class="footer__link-item">GitHub<svg width="13.5" height="13.5" aria-label="(opens in new tab)" class="iconExternalLink_nPIU"><use href="#theme-svg-external-link"></use></svg></a></li></ul></div></div></div></footer></div>
 </body>
 </html>

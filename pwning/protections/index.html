@@ -11,8 +11,8 @@
 <meta name="apple-mobile-web-app-title" content="CatchTheFox">
 <meta name="application-name" content="CatchTheFox">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"CatchTheFox","alternateName":["Catch The Fox","CatchTheFox - Engenharia Reversa e Pwning"],"url":"https://ariiialves.github.io/CatchTheFox/","inLanguage":"pt-BR","description":"Manual em português de engenharia reversa, pwning e exploração de binários para CTFs."}</script><link rel="stylesheet" href="/CatchTheFox/assets/css/styles.8f87cd7f.css">
-<script src="/CatchTheFox/assets/js/runtime~main.ab05dfe6.js" defer="defer"></script>
-<script src="/CatchTheFox/assets/js/main.aceb6006.js" defer="defer"></script>
+<script src="/CatchTheFox/assets/js/runtime~main.3c2cae36.js" defer="defer"></script>
+<script src="/CatchTheFox/assets/js/main.e8145a99.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
 <svg style="display: none;"><defs>
@@ -47,14 +47,14 @@
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="stack-canaryssp-stack-smashing-protector">Stack Canary/SSP (Stack-Smashing Protector)<a href="#stack-canaryssp-stack-smashing-protector" class="hash-link" aria-label="Link direto para Stack Canary/SSP (Stack-Smashing Protector)" title="Link direto para Stack Canary/SSP (Stack-Smashing Protector)" translate="no">​</a></h2>
 <p><strong>Funcionamento</strong></p>
 <ol>
-<li class="">O compilador insere um valor aleatório de 4 ou 8 bytes (o Canary) no Stack Frame da função, imediatamente antes do endereço de retorno salvo.</li>
+<li class="">O compilador insere um valor aleatório de 4 ou 8 bytes (o Canary) no Stack Frame da função, entre as variáveis locais e o <code>RBP</code> salvo / endereço de retorno (normalmente em <code>rbp-0x8</code> em x64). Assim, qualquer overflow que chegue ao endereço de retorno passa por cima do Canary antes.</li>
 <li class="">O valor do Canary é armazenado em uma área de memória separada (no Linux, na TLS - Thread Local Storage, acessada via <code>fs:0x28</code> em x64 e <code>gs:0x14</code> em x86).</li>
 <li class=""><strong>Antes de a função retornar</strong>, o código gerado pelo compilador verifica se o Canary na Stack corresponde ao valor armazenado.</li>
 <li class="">Se a verificação falhar, o programa aborta o processo (chamando a <code>__stack_chk_fail</code>, que mostra a mensagem <code>*** stack smashing detected ***</code>).</li>
 </ol>
 <p>No Linux, o byte menos significativo do Canary é sempre <code>0x00</code>. Isso impede que funções de string, como <code>puts</code> e <code>printf(&quot;%s&quot;)</code>, leiam o Canary sem querer (o <code>\0</code> encerra a string), e também que funções como <code>strcpy</code> o sobrescrevam por inteiro.</p>
 <p><strong>Efeito</strong></p>
-<p>Impede sobrescrita do <code>return address</code> na stack. <strong>Eficaz contra Buffer Overflow</strong>.</p>
+<p>Detecta a sobrescrita do <code>return address</code> (e do <code>RBP</code> salvo) na stack antes do <code>ret</code>. <strong>Eficaz contra Buffer Overflow</strong>. Note que ele não protege variáveis locais que estejam entre o buffer e o Canary (<a class="" href="/CatchTheFox/pwning/stack/buffer-overflow/variables/">Buffer Overflow - Variáveis</a> continua funcionando).</p>
 <p><strong>Contorno</strong></p>
 <p><strong>Vazar o Canary</strong> (o valor aleatório de verificação do Stack Canary, com Format Strings, por exemplo), <strong>mantendo o valor que ele usa como verificação na stack ao fazer o padding no Buffer Overflow</strong>. Em servidores que fazem <code>fork()</code> a cada conexão, o Canary é o mesmo em todos os processos filhos, então também é possível descobri-lo por força bruta, byte a byte. Ou sobrescrever ponteiros de função na Heap (Heap Overflow) ou em áreas não protegidas pelo Canary.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="nx-no-execute-ou-dep-data-execution-prevention">NX (No-Execute) ou DEP (Data Execution Prevention)<a href="#nx-no-execute-ou-dep-data-execution-prevention" class="hash-link" aria-label="Link direto para NX (No-Execute) ou DEP (Data Execution Prevention)" title="Link direto para NX (No-Execute) ou DEP (Data Execution Prevention)" translate="no">​</a></h2>

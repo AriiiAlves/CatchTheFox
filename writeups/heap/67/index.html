@@ -11,8 +11,8 @@
 <meta name="apple-mobile-web-app-title" content="CatchTheFox">
 <meta name="application-name" content="CatchTheFox">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"CatchTheFox","alternateName":["Catch The Fox","CatchTheFox - Engenharia Reversa e Pwning"],"url":"https://ariiialves.github.io/CatchTheFox/","inLanguage":"pt-BR","description":"Manual em português de engenharia reversa, pwning e exploração de binários para CTFs."}</script><link rel="stylesheet" href="/CatchTheFox/assets/css/styles.8f87cd7f.css">
-<script src="/CatchTheFox/assets/js/runtime~main.ab05dfe6.js" defer="defer"></script>
-<script src="/CatchTheFox/assets/js/main.aceb6006.js" defer="defer"></script>
+<script src="/CatchTheFox/assets/js/runtime~main.3c2cae36.js" defer="defer"></script>
+<script src="/CatchTheFox/assets/js/main.e8145a99.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
 <svg style="display: none;"><defs>
@@ -52,11 +52,12 @@
 <div class="language-text codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-text codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#393A34"><span class="token plain">(gdb) x/10gx 0x7fd72b728ba0</span><br></span><span class="token-line" style="color:#393A34"><span class="token plain">0x7fd72b728ba0: 0x00007fd72b728b90      0x00007fd72b728b90</span><br></span><span class="token-line" style="color:#393A34"><span class="token plain">0x7fd72b728bb0: 0x000055579136d6f0      0x000055579136d6f0</span><br></span></code></pre></div></div>
 <p>Observe que o primeiro valor e o segundo são iguais. O que é exatamente o mesmo comportamento de bin[0] e bin[1] quando a unsorted bin tem o vazamento da libc.</p>
 <p>Esse valor aponta para a main_arena.</p>
-<p>OBS: Por que o vazamento aparece na Nota 7 como se fosse um chunk único?</p>
+<p>OBS: Por que o vazamento aparece na Nota 7?</p>
 <ul>
-<li class=""><strong>Consolidação</strong>: Quando a Nota 8 é liberada logo após a Nota 7, e ambas são adjacentes na memória, a glibc as consolida (funde) em um único chunk maior para evitar fragmentação.</li>
-<li class="">O chunk resultante dessa fusão começa no endereço da Nota 7.</li>
-<li class="">Como esse novo chunk &quot;gigante&quot; (Nota 7 + Nota 8) é o único na unsorted bin, os ponteiros fd e bk escritos no cabeçalho da Nota 7 apontarão ambos para a main_arena na libc.</li>
+<li class="">Ao liberar a nota 7 (a 8ª liberada, com o tcache já cheio), ela vai para a unsorted bin sozinha, e o alocador escreve <code>fd = bk = &amp;main_arena.bins[0] - 0x10</code> nos primeiros 16 bytes dos dados dela.</li>
+<li class="">A nota 8 faz fronteira com o top chunk. Quando ela é liberada em seguida, a glibc a consolida com o top chunk <strong>e também com a nota 7</strong> (que estava livre e adjacente). Então, na verdade, as duas são absorvidas pelo top chunk e a unsorted bin fica vazia de novo.</li>
+<li class="">Mas os ponteiros <code>fd</code>/<code>bk</code> que foram escritos na nota 7 <strong>não são apagados</strong>: continuam lá, como lixo. Com o UAF de leitura, lemos esses bytes e temos o endereço da <code>main_arena</code> do mesmo jeito. Por isso &quot;ter a nota 8 ali não importa&quot; para o vazamento.</li>
+<li class="">O jeito &quot;limpo&quot; seria <strong>não liberar a nota 8</strong>: ela serve de barreira entre a nota 7 e o top chunk, e a nota 7 fica de fato na unsorted bin.</li>
 </ul>
 <h1>Após vazamento, vamos calcular offset para achar libc</h1>
 <p>Para ver endereço base da libc atual: <code>(gdb) info proc mappings</code>.
@@ -67,17 +68,17 @@ Vamos pegar o menor Start Addr de libc.so.6</p>
 <p>Agora que temos a libc, é dar um jeito de chamar system. A stack tá totalmente protegida:</p>
 <ul>
 <li class="">Sem BOF</li>
-<li class="">Sem GOT Overwrite</li>
-<li class="">Sem Shecllode</li>
-<li class="">Sem ROP (IBT impede ROP livre)</li>
-<li class="">Tem canary, se tiver BOF tenho que vazar isso</li>
+<li class="">Sem GOT Overwrite (Full RELRO)</li>
+<li class="">Sem Shellcode (NX)</li>
+<li class="">Sem hooks de malloc para sobrescrever (glibc ≥ 2.34 não tem mais <code>__free_hook</code>/<code>__malloc_hook</code>)</li>
+<li class="">Tem canary, se tivesse BOF teria que vazar isso</li>
 </ul>
-<p>Desistir? Não. Descobri algo chamado <strong>ENVIRON</strong>. Existe, na LIBC, uma variável que aponta para a stack. Isso vaza a stack para nós, e aí usamos Double Free na Heap (Tcache Poisoning) para escrita arbitrária onde o ENVIRON aponta + offset até o <code>return address</code>.</p>
+<p>Desistir? Não. Descobri algo chamado <strong>ENVIRON</strong>. Existe, na LIBC, uma variável (<code>environ</code>) que aponta para o array de variáveis de ambiente, que fica na stack. Lendo essa variável, vazamos um endereço da stack, e a distância dele até o <code>return address</code> de uma função é fixa. Aí usamos Tcache Poisoning (via UAF: editar o <code>fd</code> de uma nota liberada) para alocar um chunk em cima da stack e escrever uma ROP chain no <code>return address</code>. Como a stack é gravável e a chain usa gadgets da libc (que já conhecemos), nenhuma proteção impede isso.</p>
 <h1>Chall completo</h1>
 <ol>
 <li class=""><strong>Cria</strong> 9 notas</li>
 <li class=""><strong>Deleta</strong> 9 notas (0 a 8)</li>
-<li class="">Lê <code>HEAP_LEAK</code> na <strong>nota 0</strong> (o fd dela aponta para nulo, então com XOR é o próprio endereço da heap). O endereço da heap sempre é algo como <code>0x555..XXX</code>. Quando se faz <code>0x555...XXX &lt;&lt; 12</code>, estamos descartando esses últimos XXX. Essa é a <code>XOR_KEY</code>, que vai ser usada para codificar/decodificar tudo. Lembre que os chunks são alocados lado a lado, e com poucas notas dificilmente se passa de fff em tamanho (4095 bytes). <strong>Assim, fd_encoded = XOR_KEY ^ fd para todo chunk para nós</strong>. (<code>&amp;chunk &lt;&lt; 12</code> dá em <code>XOR_KEY</code> também).</li>
+<li class="">Lê <code>HEAP_LEAK</code> na <strong>nota 0</strong> (o fd dela aponta para nulo, então o valor armazenado é <code>(&amp;chunk &gt;&gt; 12) ^ 0</code>, ou seja, o próprio endereço da heap deslocado). O endereço da heap sempre é algo como <code>0x555..XXX</code>. Quando se faz <code>0x555...XXX &gt;&gt; 12</code>, estamos descartando esses últimos XXX. Essa é a <code>XOR_KEY</code>, que vai ser usada para codificar/decodificar tudo. Lembre que os chunks são alocados lado a lado, e com poucas notas dificilmente se passa de fff em tamanho (4095 bytes), então todos ficam na mesma página. <strong>Assim, fd_encoded = XOR_KEY ^ fd para todo chunk para nós</strong>. (<code>&amp;chunk &gt;&gt; 12</code> dá em <code>XOR_KEY</code> também).</li>
 <li class="">Lê <code>LIBC_LEAK</code> na <strong>nota 7</strong> (foi pra unsorted bin). Aparentemente, ter a nota 8 ali não importa pro vazamento. Usar isso para achar <code>LIBC_BASE</code>.</li>
 <li class="">Com <code>LIBC_LEAK</code>, usa offset para pegar <code>ROPs</code> para montar payload e endereço de <code>ENVIRON</code> (vazamento de stack na LIBC)</li>
 <li class="">Cria 2 notas (0 e 1). Faz <strong>tcache poisoning para ler ENVIRON</strong> (free 0, free 1, edit 1 (coloca ENVIRON ^ XOR_KEY no fd), malloc 1, malloc 0, read 0) para alocar no ENVIRON (LIBC). Lê a nota (lemos o ENVIRON, endereço vazado da stack) para <strong>STACK_LEAK</strong></li>
@@ -86,8 +87,8 @@ Vamos pegar o menor Start Addr de libc.so.6</p>
 </ol>
 <p>OBS: Era necessário fazer o ROP na create_note() em vez da main() porque a main() fecha com exit(0) e, portanto, não tem faz ret</p>
 <p>OBS: Todos os offsets foram calculados do jeito preguiçoso: durante uma execução real do programa, pega os dois endereços no GDB e os subtrai</p>
-<p>OBS: Tcache poisoning é um double free</p>
-<p>OBS: Comportamento da Unsorted Bin (Passo 4). Se a nota 7 for a última antes do Top Chunk, ao ser liberada, ela <strong>será consolidada com o Top Chunk em vez de ir para a Unsorted Bin</strong>. A nota 8 serve como uma &quot;barreira&quot; (wilderness protector) para garantir que a nota 7 fique isolada e receba os ponteiros da libc (main_arena).</p>
+<p>OBS: Aqui, o Tcache poisoning foi feito com o UAF de escrita (editar a nota liberada sobrescreve o <code>fd</code>), e não com double free. O double free na glibc 2.42 seria barrado pela tcache key, a menos que a <code>key</code> também fosse sobrescrita.</p>
+<p>OBS: Comportamento da Unsorted Bin (Passo 4). Se a nota 7 fosse a última antes do Top Chunk, ao ser liberada ela <strong>seria consolidada com o Top Chunk em vez de ir para a Unsorted Bin</strong>, e os ponteiros da libc nunca seriam escritos nela. A nota 8 serve como uma &quot;barreira&quot; nesse momento: é por ela existir que a nota 7 vai para a unsorted bin e recebe <code>fd</code>/<code>bk</code> apontando para a <code>main_arena</code>. (Liberar a nota 8 depois funde tudo no top, mas os ponteiros já escritos na nota 7 permanecem, como explicado acima.)</p>
 <p>Environ é uma variável na libc que aponta para variáveis de ambiente na stack. Podemos vazar a stack com isso.</p></div></article><nav class="docusaurus-mt-lg pagination-nav" aria-label="Páginas de documento"><a class="pagination-nav__link pagination-nav__link--prev" href="/CatchTheFox/writeups/"><div class="pagination-nav__sublabel">Anterior</div><div class="pagination-nav__label">Writeups</div></a><a class="pagination-nav__link pagination-nav__link--next" href="/CatchTheFox/extra/"><div class="pagination-nav__sublabel">Próxima</div><div class="pagination-nav__label">Material Extra</div></a></nav></div></div></div></div></main></div></div></div><footer class="theme-layout-footer footer footer--dark"><div class="container container-fluid"><div class="row footer__links"><div class="theme-layout-footer-column col footer__col"><div class="footer__title">Aprenda</div><ul class="footer__items clean-list"><li class="footer__item"><a class="footer__link-item" href="/CatchTheFox/">Guia</a></li></ul></div><div class="theme-layout-footer-column col footer__col"><div class="footer__title">Comunidade</div><ul class="footer__items clean-list"><li class="footer__item"><a href="https://discord.gg/pFSq368vu7" target="_blank" rel="noopener noreferrer" class="footer__link-item">Discord<svg width="13.5" height="13.5" aria-label="(opens in new tab)" class="iconExternalLink_nPIU"><use href="#theme-svg-external-link"></use></svg></a></li></ul></div><div class="theme-layout-footer-column col footer__col"><div class="footer__title">Mais</div><ul class="footer__items clean-list"><li class="footer__item"><a href="https://github.com/AriiiAlves/CatchTheFox" target="_blank" rel="noopener noreferrer" class="footer__link-item">GitHub<svg width="13.5" height="13.5" aria-label="(opens in new tab)" class="iconExternalLink_nPIU"><use href="#theme-svg-external-link"></use></svg></a></li></ul></div></div></div></footer></div>
 </body>
 </html>
