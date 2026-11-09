@@ -7,25 +7,27 @@ Ghidra é um **decompilador open source** elaborado pela NSA. Um decompilador tr
 
 Além do Ghidra, temos opções como IDA, porém o Ghidra é de graça e open-source.
 
-Requer: **Java Development Kit (JDK)** e **Python3**.
+Requer: **Java Development Kit (JDK)** 64-bit (versões atuais pedem o JDK 21). Python3 é opcional (só para scripts).
 
-## 4.1 Baixando (Linux)
+## Baixando (Linux)
 
-1. **Baixe o JDK** de acordo com a arquitetura do seu PC (x64 ou x82)
-2. **Descomprima o arquivo** com `tar -xyf file.tar.gz`
+Atalho: `sudo apt install openjdk-21-jdk`, baixe o zip na [página de releases](https://github.com/NationalSecurityAgency/ghidra/releases), descompacte e rode `./ghidraRun`. Ou, manualmente:
+
+1. **Baixe o JDK** de acordo com a arquitetura do seu PC (x64 ou ARM64)
+2. **Descomprima o arquivo** com `tar -xzf file.tar.gz`
 3. **Baixe o zip do GHIDRA** e dê `unzip file`
-4. Digite o comando `vi ~/.bashrc` - No fim do arquivo, adicione o diretório bin de JDK para a variável PATH: `export PATH=<path_JDK>/bin:$PATH`. Ache o caminho com para JDK com o comando `pwd`.
+4. Digite o comando `vi ~/.bashrc` - No fim do arquivo, adicione o diretório bin de JDK para a variável PATH: `export PATH=<path_JDK>/bin:$PATH`. Ache o caminho para o JDK com o comando `pwd`.
 5. Digite `java --version` para testar.
 6. Na pasta do ghidra, **rode o arquivo ghidraRun**
 
-## 4.1 Baixando (Windows)
+## Baixando (Windows)
 
-1. **Baixe o JDK** de acordo com a arquitetura do seu PC (x64 ou x82)
+1. **Baixe o JDK** de acordo com a arquitetura do seu PC (x64 ou ARM64)
 2. **Execute o instalador**
 3. **Baixe o zip do GHIDRA** e descomprima
 4. Crie um atalho para o arquivo **ghidraRun** na sua área de trabalho
 
-## 4.2 Usando
+## Usando
 
 1. Crie um projeto em **New Project**
 2. **File > Import File** (ou drag and drop file)
@@ -35,12 +37,16 @@ Requer: **Java Development Kit (JDK)** e **Python3**.
 
 
 ### Interface
-- Em cima à esquerda, há a **Program Tree**. Mostra a estrutura de programas (que **foram separados de acordo com os blocos do arquivo compilado original**).
+- Em cima à esquerda, há a **Program Tree**. Mostra a estrutura do programa, **separada de acordo com os blocos de memória do arquivo compilado original** (seções como `.text` e `.data`).
 - À esquerda, há a **symbol tree**. Permite encontrar **símbolos** na navegação.
 - Embaixo à esquerda, há o Data Type Manager. Permite **achar, aplicar e criar tipos de dados**.
 - Aperte **'G'** para navegar para um endereço ou palavra.
-- No meio, mostra a **visualização em assembly** do programa. Selecione linhas, e elas serão mostradas à direita, no **C decompiller**. Em qualquer lugar do Assembly que você clique, irá ser mostrado o mesmo código em C à direita (próximo do código original).
+- No meio, mostra a **visualização em assembly** do programa. Selecione linhas, e elas serão mostradas à direita, no **Decompiler**. Em qualquer lugar do Assembly que você clique, irá ser mostrado o mesmo código em C à direita (próximo do código original).
 
 ### Utilidades gerais
-- Use **L para renomear uma variável**.
-- Use **Ctrl+L para renomear um tipo de variável**.
+- **L** - Renomear variável/função
+- **Ctrl+L** - Alterar o tipo de uma variável (ex: `int` → `char`)
+- **Ctrl+Shift+F** - Referências (quem chama a função / quem usa a variável)
+- **;** - Comentário na linha
+- **G** - Ir para endereço/símbolo
+- **Window > Defined Strings** - Todas as strings do binário. Clique duas vezes e veja quem usa

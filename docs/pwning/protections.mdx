@@ -46,7 +46,7 @@ Impede ataques que visam modificar ponteiros em áreas de relocação, como o GO
 
 **Funcionamento**
 
-1. O compilador insere um valor aleatório de 4 ou 8 bytes (o Canary) no Stack Frame da função, imediatamente antes do endereço de retorno salvo.
+1. O compilador insere um valor aleatório de 4 ou 8 bytes (o Canary) no Stack Frame da função, entre as variáveis locais e o `RBP` salvo / endereço de retorno (normalmente em `rbp-0x8` em x64). Assim, qualquer overflow que chegue ao endereço de retorno passa por cima do Canary antes.
 2. O valor do Canary é armazenado em uma área de memória separada (no Linux, na TLS - Thread Local Storage, acessada via `fs:0x28` em x64 e `gs:0x14` em x86).
 3. **Antes de a função retornar**, o código gerado pelo compilador verifica se o Canary na Stack corresponde ao valor armazenado.
 4. Se a verificação falhar, o programa aborta o processo (chamando a `__stack_chk_fail`, que mostra a mensagem `*** stack smashing detected ***`).
@@ -55,7 +55,7 @@ No Linux, o byte menos significativo do Canary é sempre `0x00`. Isso impede que
 
 **Efeito**
 
-Impede sobrescrita do `return address` na stack. **Eficaz contra Buffer Overflow**.
+Detecta a sobrescrita do `return address` (e do `RBP` salvo) na stack antes do `ret`. **Eficaz contra Buffer Overflow**. Note que ele não protege variáveis locais que estejam entre o buffer e o Canary ([Buffer Overflow - Variáveis](./stack/buffer-overflow/variables.md) continua funcionando).
 
 **Contorno**
 

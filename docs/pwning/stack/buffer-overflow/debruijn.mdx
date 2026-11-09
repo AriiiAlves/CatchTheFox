@@ -31,4 +31,14 @@ pwndbg> x/x $rbp+0x8
 72 # Isso quer dizer que temos uma distância de 72 bytes até nosso alvo, que temos que preencher (padding)!
 ```
 
-Internamente, o `cyclic` gera uma sequência de De Bruijn de caracteres onde `n = 4`. Isso faz a sequência funcionar para 32 e 64 bits.
+Internamente, o `cyclic` gera uma sequência de De Bruijn de caracteres onde `n = 4` (cada grupo de 4 letras é único). Isso faz a sequência funcionar para 32 e 64 bits: em 64 bits, basta olhar os 4 primeiros bytes do valor (o `cyclic_find` já faz isso sozinho se você passar o valor de 8 bytes, mas avisa que truncou).
+
+```py
+# 64 bits: o valor em $rbp+0x8 era 0x6161617361616172
+>>> cyclic_find(0x6161617361616172)   # pwntools usa só os 4 bytes de baixo (0x61616172)
+68
+```
+
+Também dá para fazer tudo pelo terminal, sem Python: `cyclic 200` gera a sequência e `cyclic -l 0x61616173` acha o offset. No GDB com pwndbg/GEF, os comandos `cyclic` e `pattern create`/`pattern search` fazem o mesmo.
+
+Em binários 32 bits, se o programa crashar com `EIP = 0x61616173`, o offset até o `return address` é `cyclic_find(0x61616173)`. Em 64 bits, o `ret` para um endereço não canônico (como `0x6161617361616172`) não chega a atualizar o `RIP`, então olhe o valor em `[rsp]` no momento do crash (ou em `rbp+0x8` antes do `ret`), como no exemplo acima.

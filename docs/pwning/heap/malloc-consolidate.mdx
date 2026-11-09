@@ -65,7 +65,7 @@ struct malloc_chunk {
 typedef struct malloc_chunk* mchunkptr // PONTEIRO para chunk;
 ```
 
-Os bins ficam em `main_arena.bins` (mesma coisa que `malloc_chunk.bins`). O array `bins` guarda os ponteiros para o primeiro/último chunk de cada bin/lista.
+Os bins ficam em `main_arena.bins`. O array `bins` guarda os ponteiros para o primeiro/último chunk de cada bin/lista.
 
 Bom, tomemos a unsorted bin. É uma lista duplamente encadeada (`fd` e `bk`), certo? Em uma **lista encadeada circular**, o **último elemento aponta para o primeiro**. Na implementação da `libc`, o HEAD possui dois ponteiros: um que aponta para o **primeiro** chunk e outro que aponta para o último (por que o HEAD aponta para os dois? Para fins de otimização).
 
@@ -91,45 +91,49 @@ main_arena.bins[0] (HEAD da unsorted bin):
     - bins[1] = bk do HEAD (aponta para último chunk)
 ```
 
-Quando unsorted bin está **VAZIO**, por lógica da `libc`, `main_arena.bins[0] = &bins[0]` e `main_arena.bins[1] = &bins[1]` (apontam para si mesmos).
+O truque da `libc` é tratar o HEAD como se fosse um chunk: `bins[0]` e `bins[1]` são lidos como se fossem os campos `fd` e `bk` de um "chunk falso" que começa 16 bytes antes, em `&bins[0] - 0x10` (já que, em um chunk de verdade, `fd` fica no offset `0x10`). Esse endereço (`&bins[0] - 0x10`, dentro da `main_arena`) é o que os chunks da lista usam para apontar "de volta para o HEAD".
+
+Quando a unsorted bin está **VAZIA**, o HEAD aponta para si mesmo:
 
 ```
-main_arena.bins[0]: [fd = &bins[0]]  ← aponta para SI MESMO!
-main_arena.bins[1]: [bk = &bins[0]]  ← aponta para SI MESMO!
+bins[0] (fd do HEAD) = &bins[0] - 0x10   ← o "chunk falso" aponta para SI MESMO
+bins[1] (bk do HEAD) = &bins[0] - 0x10
 ```
 
-Quando unsorted bin possui **UM chunk**, `main_arena.bins[0] = &chunk` e `main_arena.bins[1] = &chunk`  (apontam para chunk):
+Quando a unsorted bin possui **UM chunk**, o HEAD aponta para o chunk nos dois sentidos, e o chunk aponta de volta para o HEAD nos dois sentidos:
 
 ```
 Memória da libc (main_arena):
-bins[0] (fd do HEAD) → aponta para CHUNK
-bins[1] (bk do HEAD) → aponta para CHUNK
+bins[0] (fd do HEAD) → CHUNK
+bins[1] (bk do HEAD) → CHUNK
 
 Memória da heap (CHUNK):
-chunk->fd → aponta para bins[0] (na libc)
-chunk->bk → aponta para bins[1] (na libc)
+chunk->fd → &bins[0] - 0x10 (na libc)
+chunk->bk → &bins[0] - 0x10 (na libc)   ← o MESMO endereço do fd
 
 Círculo completo:
-bins[0] → CHUNK → bins[0]
-bins[1] → CHUNK → bins[1]
+HEAD → CHUNK → HEAD
 ```
 
-E aqui está O VAZAMENTO QUE QUERÍAMOS! **Com UM CHUNK, `fd` e `bk` desse mesmo chunk apontam para dentro da libc!**
+E aqui está O VAZAMENTO QUE QUERÍAMOS! **Com UM CHUNK, `fd` e `bk` desse mesmo chunk apontam para dentro da libc, e para o mesmo endereço!** (Essa igualdade é um bom sinal de que você está olhando para o chunk certo)
 
 ```
-main_arena na LIBC (&bins = 0x7ffff7dd1b00):
+main_arena na LIBC (&bins[0] = 0x7ffff7dd1b10):
 ┌─────────────────────────────┐
-│ bins[0] (fd): 0x55555555a010│← aponta para CHUNK
-│ bins[1] (bk): 0x55555555a010│← aponta para CHUNK
+│ bins[0] (fd): 0x55555555a000│← aponta para CHUNK (header)
+│ bins[1] (bk): 0x55555555a000│← aponta para CHUNK (header)
 └─────────────────────────────┘
                      
-CHUNK na HEAP (0x55555555a010):
+CHUNK na HEAP (header em 0x55555555a000, dados em 0x55555555a010):
 ┌─────────────────────────────┐
-│ fd: 0x7ffff7dd1b00          │← aponta para LIBC! (bins[0])
-│ bk: 0x7ffff7dd1b08          │← aponta para LIBC! (bins[1])
-│ ... dados do chunk ...      │
+│ prev_size | size            │
+│ fd: 0x7ffff7dd1b00          │← aponta para LIBC! (&bins[0] - 0x10)
+│ bk: 0x7ffff7dd1b00          │← aponta para LIBC! (o mesmo endereço)
+│ ... resto dos dados ...     │
 └─────────────────────────────┘
 ```
+
+Esse endereço vazado é `&main_arena + 96` (o offset do `top` + `bins` dentro da struct, em 64 bits). A `main_arena` é um símbolo da libc, então `libc_base = leak - (libc.sym['main_arena'] + 96)`. Se o pwntools não achar o símbolo `main_arena` (ele é interno), descubra o offset uma vez no GDB: `leak - libc_base`, com a base obtida em `vmmap` ou `info proc mappings`.
 
 ## Ativando malloc_conosolidate
 
@@ -159,7 +163,9 @@ free(b);  // CONSOLIDA AUTOMATICAMENTE com 'a' e 'c'!
 // Resultado: um chunk de ~0x300 na unsorted bin
 ```
 
-Isso não 
+Para o exemplo acima funcionar, é preciso que `c` não seja vizinho do top chunk, senão `free(c)` o consolida com o top em vez de mandá-lo para a unsorted bin. Na prática, aloque uma "barreira" depois (`char *barreira = malloc(0x100);`) e não a libere. O mesmo vale para o chunk que você quer que fique sozinho na unsorted bin: ele não pode encostar no top.
+
+Em glibc ≥ 2.26, lembre-se também do [tcache](./tcache.mdx): chunks de até `0x410` vão primeiro para ele (7 por tamanho), e só depois para as fastbins/unsorted bin. Então ou use tamanhos maiores que `0x410`, ou preencha o tcache antes.
 
 ## Resumo
 
@@ -167,4 +173,6 @@ Isso não
 2. Chunks na unsorted bin → vazam endereços da libc
 3. Para mover chunks da fastbin para unsorted bin → chame `malloc_consolidate()` (consolida chunks na fastbin e move para unsorted bin)
 4. Para chamar `malloc_consolidate()` → use funções que alocam muito de uma só vez (scanf/printf grandes)
-5. Vaze `fd` ou `bk` do chunk que agora está na unsorted bin com UAF, Heap Overflow ou Double Free.
+5. Vaze `fd` ou `bk` do chunk que agora está na unsorted bin com UAF (lendo o chunk liberado) ou alocando um chunk em cima dele sem limpar os dados (o `malloc` não zera o conteúdo, então um `malloc` do mesmo tamanho seguido de um `print` mostra o `fd` antigo, desde que o programa não sobrescreva esses 16 bytes primeiro).
+
+Em glibc ≥ 2.26, o jeito mais simples de levar um chunk à unsorted bin é encher o tcache: veja [Libc-Leak com Tcache](./tcache.mdx#libc-leak-com-tcache).

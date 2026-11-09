@@ -27,7 +27,7 @@ Temos a GOT, que possui o endereço da funções externas ao código. Ela precis
 
 Temos também a PLT (Procedure Linkage Table). Ela é intermediária entre o GOT e o programa. Sempre que você chama uma função da libc, você vai perceber que estará chamando `printf@plt` que aponta para `printf@got`. Isso é um **link**. 
 
-Na **primeira chamada** de uma função, o dinamic linker resolve o endereço real e escreve o endereço real em `printf@got`, ou seja, na GOT. **Nas próximas chamadas**, o programa continua usando `printf@plt`, mas o GOT agora possui o endereço definitivo da função na `libc`.
+Na **primeira chamada** de uma função, o *dynamic linker* (o `ld.so`, que roda no próprio processo, em modo usuário) resolve o endereço real e escreve o endereço real em `printf@got`, ou seja, na GOT. **Nas próximas chamadas**, o programa continua usando `printf@plt`, mas o GOT agora possui o endereço definitivo da função na `libc`. Esse esquema se chama *lazy binding* (resolução preguiçosa) e é o padrão com [Partial RELRO](../protections.mdx#relro-relocation-read-only).
 
 Na primeira chamada:
 
@@ -45,7 +45,7 @@ GOT (Global Offset Table)
     │ (na 1ª vez: aponta de volta para resolver)
     ▼
     │
-    └─► Volta para PLT (que chama o linker dinâmico no kernel)
+    └─► Volta para PLT (que chama o resolvedor do linker dinâmico, _dl_runtime_resolve)
         │
         ▼ linker dinâmico resolve o endereço real
         │
@@ -70,13 +70,11 @@ GOT (Global Offset Table)
     └─► printf na libc (em memória)
 ```
 
-Isso é importante, pois isso quer dizer que **podemos sobrescrever a GOT (temos permissão de escrita)**.
+Isso é importante, pois, como a GOT precisa ser escrita durante a execução, **ela fica em uma região com permissão de escrita, e nós também podemos sobrescrevê-la** (a menos que o binário tenha Full RELRO, caso em que tudo é resolvido no início e a GOT vira somente leitura).
 
-Para entender melhor o funciona
+Se olharmos uma chamada de função da `libc` qualquer em um binário, veremos que esta chama `função@plt`, que faz um `jmp` para o endereço guardado em `função@got`. Na primeira chamada, `função@got` estará apontando para `função@plt+6`, a instrução seguinte do próprio stub da PLT. Esse trecho empilha o índice da função e pula para o início da PLT (`PLT0`), que chama o resolvedor do linker dinâmico (`_dl_runtime_resolve`, dentro do `ld.so`). Ele descobre o endereço da função na libc, grava na GOT e pula para a função.
 
-Se olharmos uma chamada de função da `libc` qualquer em um binário, veremos que esta chama `função@plt`, que aponta para `função@got`. Na primeira chamada, `função@got` estará apontando para `função@plt+X`, com X sendo um número. Esse "callback" é uma chamada dentro de `função@plt` para dentro do kernel, que faz a resolução do endereço da função.
-
-Após a primeira chamada, `função@plt` aponta para `função@got` que aponta para `função@libc`. Veremos isso na prática.
+Após a primeira chamada, `função@plt` faz o `jmp` para `função@got`, que agora contém `função@libc`. Veremos isso na prática.
 
 
 ## Sobrescrevendo GOT
@@ -167,14 +165,12 @@ Dump of assembler code for function fgets@plt:
    0x0804904b <+11>:    jmp    0x8049020
 End of assembler dump.
 
-pwndbg> x 0x8049020
-0x8049020:      0xc00435ff
-
-pwndbg> x 0xc00435ff
-0xc00435ff:     Cannot access memory at address 0xc00435ff
+pwndbg> x/2i 0x8049020
+   0x8049020:   push   DWORD PTR ds:0x804c004
+   0x8049026:   jmp    DWORD PTR ds:0x804c008
 ```
 
-A memória que não conseguimos acessar é o PLT chamando o linker dinâmico dentro do kernel.
+`0x8049020` é o início da PLT (`PLT0`). Ele empilha `GOT[1]` (um identificador do binário para o linker) e pula para `GOT[2]`, que contém o endereço de `_dl_runtime_resolve`, a função do `ld.so` que faz a resolução. O `push 0x8` que vimos em `fgets@plt+6` é o índice da `fgets` na tabela de relocações, para o resolvedor saber qual função procurar.
 
 Depois da primeira execução:
 
@@ -190,7 +186,7 @@ Agora temos `fgets` na libc. Assim, vemos na prática toda a teoria sobre PLT e 
 
 #### Encontrando offset do buffer
 
-Primeiro, vamos encontrar o offset até o começo do buffer. Lembre-se que fazemos isso apenas colocando vários `%p` até ser impresso `0x..7025..` que é `%p` em hexadecimal. **Isso indica que chegamos no início do buffer**.
+Primeiro, vamos encontrar o offset até o começo do buffer. Lembre-se que fazemos isso apenas colocando vários `%p` até ser impresso `0x..7025..`, que é `%p` em hexadecimal (`25 70`, invertido pelo little endian). **Isso indica que chegamos no início do buffer**.
 
 ```
 $./programa
@@ -332,10 +328,12 @@ payload = fmtstr_payload(5, {elf.got['printf'] : libc.sym['system']})
 p.sendline(payload)
 
 # Após 1 loop, voltamos ao printf novamente, que agora é system!
-p.sendline('/bin/sh') # Na verdade: system("/bin/sh")
+p.sendline(b'/bin/sh') # printf(buffer) virou system("/bin/sh\n")
 
 p.interactive()
 ```
+
+(O `\n` que o `fgets` deixa no fim da string não atrapalha: `system("/bin/sh\n")` funciona do mesmo jeito.)
 
 #### Analisando o payload
 
@@ -376,7 +374,7 @@ Separando, conseguimos entender melhor.
 
 Lembre-se que **`%hhn` escreve apenas 1 byte (0x00 - 0xff) no endereço apontado** (veja [Format Strings - Tipos de Format Strings](./format-strings.md#tipos-de-format-strings)). Assim, estamos escrevendo o endereço de `system@libc` em `printf@got` byte a byte!
 
-Isso evita ter que usar números muito grandes e facilita o processo. Note também que usar `%n` exige que escrevamos os bytes em ordem crescente, já que somente podemos adicionar caracteres à contagem do `%n`, nunca retirar. Se o endereço a ser escrito não estivesse com os bytes em ordem crescente (como `0x000030d6`, `d6` é maior que `30` e `30` é maior que `00` e `00`), bastaria alterar a ordem dos parâmetros (o pwntools faz isso automaticamente).
+Isso evita ter que usar números muito grandes e facilita o processo. Note também que usar `%n` exige que escrevamos os bytes em ordem crescente, já que somente podemos adicionar caracteres à contagem do `%n`, nunca retirar. Se o endereço a ser escrito não estivesse com os bytes em ordem crescente (como `0x000030d6`, `d6` é maior que `30` e `30` é maior que `00` e `00`), bastaria alterar a ordem dos parâmetros (o pwntools faz isso automaticamente). Outro truque: como o `%hhn` só grava o byte menos significativo do contador, imprimir 256 caracteres é o mesmo que imprimir 0. Então, para "voltar" de `0xf7` para `0x30`, basta imprimir `0x130 - 0xf7` caracteres.
 
 ##### Parte 2: Endereços
 
@@ -393,7 +391,9 @@ Por que 16° parâmetro, se o início do buffer era o 5° parâmetro? Aí que es
 
 Lembra que temos 44 caracteres = 44 bytes? Bom, 44 / 4 bytes (x86) nos dá 11 parâmetros. **Assim, a format string está ocupando 11 parâmetros**, já que a cada 4 bytes temos um parâmetro. Pulamos isso fazendo 5 + 11 = 16. Portanto, o 16° parâmetro é o primeiro endereço (printf@got + 0).
 
-Em alguns payloads gerados pelo pwntools, você vai perceber que ele coloca `aaa` de padding ao final da format string. Isso ocorre pois ele está deixando a format string alinhada em 4 bytes, para o parâmetro do endereço ser capturado corretamente e não pela metade.
+Em alguns payloads gerados pelo pwntools, você vai perceber que ele coloca `aaa` de padding ao final da format string. Isso ocorre pois ele está deixando a format string alinhada em 4 bytes (8 em 64 bits), para o parâmetro do endereço ser capturado corretamente e não pela metade.
+
+Em 64 bits, o processo é o mesmo, com duas diferenças: os parâmetros têm 8 bytes (então a format string ocupa `len / 8` parâmetros) e os endereços contêm bytes nulos, por isso eles precisam ficar **depois** da format string (o `fmtstr_payload` já faz isso quando `context.bits == 64`).
 
 ## Créditos
 

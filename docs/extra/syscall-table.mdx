@@ -3,15 +3,23 @@ title: Tabela de Syscalls para kernel Linux
 sidebar_position: 1
 ---
 
-| x86_64 | x86 | Nome | Argumentos (%rdi, %rsi, %rdx, %r10, %r8, %r9 para x86-64) | Manual |
+Números das syscalls do Linux nas arquiteturas x86-64 (coluna `x86_64`, usados com a instrução `syscall`) e x86 de 32 bits (coluna `x86`, usados com `int 0x80`). Os números vêm dos headers do kernel (`asm/unistd_64.h` e `asm/unistd_32.h`).
+
+Observações para 32 bits:
+
+- Em x86 de 32 bits, as syscalls de socket (`socket`, `connect`, `bind`, ...) historicamente eram feitas através de `socketcall` (102), passando o número da operação em `ebx` (`SYS_SOCKET` = 1, `SYS_CONNECT` = 3, ...). A partir do kernel 4.3, elas também possuem números próprios (359 em diante), que são os listados abaixo. O mesmo vale para as syscalls de IPC (`shmget`, `semget`, `msgget`, ...), que usavam `ipc` (117) e ganharam números próprios (393 em diante) no kernel 5.1.
+- Em 32 bits, `stat`/`fstat`/`lstat` (106/108/107) usam a `struct stat` antiga. Os programas modernos usam `stat64`/`fstat64`/`lstat64` (195/196/197), e `mmap` (90) costuma ser substituída por `mmap2` (192).
+- `-` indica que a syscall não existe em 32 bits com esse nome.
+
+| x86_64 | x86 | Nome | Argumentos (x86-64: rdi, rsi, rdx, r10, r8, r9 / x86: ebx, ecx, edx, esi, edi, ebp) | Manual |
 |--------|-----|------|------------------------------------------------|--------|
 | 0 | 3 | read | unsigned int fd, char *buf, size_t count | [read(2)](https://manpages.debian.org/unstable/manpages-dev/read.2.en.html) |
 | 1 | 4 | write | unsigned int fd, const char *buf, size_t count | [write(2)](https://manpages.debian.org/unstable/manpages-dev/write.2.en.html) |
 | 2 | 5 | open | const char *filename, int flags, umode_t mode | [open(2)](https://manpages.debian.org/unstable/manpages-dev/open.2.en.html) |
 | 3 | 6 | close | unsigned int fd | [close(2)](https://manpages.debian.org/unstable/manpages-dev/close.2.en.html) |
-| 4 | 18 | stat | const char *filename, struct stat *statbuf | [stat(2)](https://manpages.debian.org/unstable/manpages-dev/stat.2.en.html) |
-| 5 | 28 | fstat | unsigned int fd, struct stat *statbuf | [fstat(2)](https://manpages.debian.org/unstable/manpages-dev/fstat.2.en.html) |
-| 6 | 84 | lstat | const char *filename, struct stat *statbuf | [lstat(2)](https://manpages.debian.org/unstable/manpages-dev/lstat.2.en.html) |
+| 4 | 106 | stat | const char *filename, struct stat *statbuf | [stat(2)](https://manpages.debian.org/unstable/manpages-dev/stat.2.en.html) |
+| 5 | 108 | fstat | unsigned int fd, struct stat *statbuf | [fstat(2)](https://manpages.debian.org/unstable/manpages-dev/fstat.2.en.html) |
+| 6 | 107 | lstat | const char *filename, struct stat *statbuf | [lstat(2)](https://manpages.debian.org/unstable/manpages-dev/lstat.2.en.html) |
 | 7 | 168 | poll | struct pollfd *ufds, unsigned int nfds, int timeout | [poll(2)](https://manpages.debian.org/unstable/manpages-dev/poll.2.en.html) |
 | 8 | 19 | lseek | unsigned int fd, off_t offset, unsigned int whence | [lseek(2)](https://manpages.debian.org/unstable/manpages-dev/lseek.2.en.html) |
 | 9 | 90 | mmap | unsigned long addr, unsigned long len, unsigned long prot, unsigned long flags, unsigned long fd, unsigned long pgoff | [mmap(2)](https://manpages.debian.org/unstable/manpages-dev/mmap.2.en.html) |
@@ -34,9 +42,9 @@ sidebar_position: 1
 | 26 | 144 | msync | unsigned long start, size_t len, int flags | [msync(2)](https://manpages.debian.org/unstable/manpages-dev/msync.2.en.html) |
 | 27 | 218 | mincore | unsigned long start, size_t len, unsigned char * vec | [mincore(2)](https://manpages.debian.org/unstable/manpages-dev/mincore.2.en.html) |
 | 28 | 219 | madvise | unsigned long start, size_t len, int behavior | [madvise(2)](https://manpages.debian.org/unstable/manpages-dev/madvise.2.en.html) |
-| 29 | 30 | shmget | key_t key, size_t size, int flag | [shmget(2)](https://manpages.debian.org/unstable/manpages-dev/shmget.2.en.html) |
-| 30 | 31 | shmat | int shmid, char *shmaddr, int shmflg | [shmat(2)](https://manpages.debian.org/unstable/manpages-dev/shmat.2.en.html) |
-| 31 | 32 | shmctl | int shmid, int cmd, struct shmid_ds *buf | [shmctl(2)](https://manpages.debian.org/unstable/manpages-dev/shmctl.2.en.html) |
+| 29 | 395 | shmget | key_t key, size_t size, int flag | [shmget(2)](https://manpages.debian.org/unstable/manpages-dev/shmget.2.en.html) |
+| 30 | 397 | shmat | int shmid, char *shmaddr, int shmflg | [shmat(2)](https://manpages.debian.org/unstable/manpages-dev/shmat.2.en.html) |
+| 31 | 396 | shmctl | int shmid, int cmd, struct shmid_ds *buf | [shmctl(2)](https://manpages.debian.org/unstable/manpages-dev/shmctl.2.en.html) |
 | 32 | 41 | dup | unsigned int fildes | [dup(2)](https://manpages.debian.org/unstable/manpages-dev/dup.2.en.html) |
 | 33 | 63 | dup2 | unsigned int oldfd, unsigned int newfd | [dup2(2)](https://manpages.debian.org/unstable/manpages-dev/dup2.2.en.html) |
 | 34 | 29 | pause | No arguments | [pause(2)](https://manpages.debian.org/unstable/manpages-dev/pause.2.en.html) |
@@ -46,21 +54,21 @@ sidebar_position: 1
 | 38 | 104 | setitimer | int which, struct __kernel_old_itimerval *value, struct __kernel_old_itimerval *ovalue | [setitimer(2)](https://manpages.debian.org/unstable/manpages-dev/setitimer.2.en.html) |
 | 39 | 20 | getpid | No arguments | [getpid(2)](https://manpages.debian.org/unstable/manpages-dev/getpid.2.en.html) |
 | 40 | 187 | sendfile | int out_fd, int in_fd, loff_t *offset, size_t count | [sendfile(2)](https://manpages.debian.org/unstable/manpages-dev/sendfile.2.en.html) |
-| 41 | 102 | socket | int, int, int | [socket(2)](https://manpages.debian.org/unstable/manpages-dev/socket.2.en.html) |
-| 42 | 98 | connect | int, struct sockaddr *, int | [connect(2)](https://manpages.debian.org/unstable/manpages-dev/connect.2.en.html) |
-| 43 | 99 | accept | int, struct sockaddr *, int * | [accept(2)](https://manpages.debian.org/unstable/manpages-dev/accept.2.en.html) |
-| 44 | 101 | sendto | int, void *, size_t, unsigned, struct sockaddr *, int | [sendto(2)](https://manpages.debian.org/unstable/manpages-dev/sendto.2.en.html) |
-| 45 | 97 | recvfrom | int, void *, size_t, unsigned, struct sockaddr *, int * | [recvfrom(2)](https://manpages.debian.org/unstable/manpages-dev/recvfrom.2.en.html) |
-| 46 | 100 | sendmsg | int fd, struct user_msghdr *msg, unsigned flags | [sendmsg(2)](https://manpages.debian.org/unstable/manpages-dev/sendmsg.2.en.html) |
-| 47 | 103 | recvmsg | int fd, struct user_msghdr *msg, unsigned flags | [recvmsg(2)](https://manpages.debian.org/unstable/manpages-dev/recvmsg.2.en.html) |
-| 48 | 91 | shutdown | int, int | [shutdown(2)](https://manpages.debian.org/unstable/manpages-dev/shutdown.2.en.html) |
-| 49 | 169 | bind | int, struct sockaddr *, int | [bind(2)](https://manpages.debian.org/unstable/manpages-dev/bind.2.en.html) |
-| 50 | 183 | listen | int, int | [listen(2)](https://manpages.debian.org/unstable/manpages-dev/listen.2.en.html) |
-| 51 | 170 | getsockname | int, struct sockaddr *, int * | [getsockname(2)](https://manpages.debian.org/unstable/manpages-dev/getsockname.2.en.html) |
-| 52 | 171 | getpeername | int, struct sockaddr *, int * | [getpeername(2)](https://manpages.debian.org/unstable/manpages-dev/getpeername.2.en.html) |
-| 53 | 135 | socketpair | int, int, int, int * | [socketpair(2)](https://manpages.debian.org/unstable/manpages-dev/socketpair.2.en.html) |
-| 54 | 105 | setsockopt | int fd, int level, int optname, char *optval, int optlen | [setsockopt(2)](https://manpages.debian.org/unstable/manpages-dev/setsockopt.2.en.html) |
-| 55 | 106 | getsockopt | int fd, int level, int optname, char *optval, int *optlen | [getsockopt(2)](https://manpages.debian.org/unstable/manpages-dev/getsockopt.2.en.html) |
+| 41 | 359 | socket | int, int, int | [socket(2)](https://manpages.debian.org/unstable/manpages-dev/socket.2.en.html) |
+| 42 | 362 | connect | int, struct sockaddr *, int | [connect(2)](https://manpages.debian.org/unstable/manpages-dev/connect.2.en.html) |
+| 43 | - (accept4 = 364) | accept | int, struct sockaddr *, int * | [accept(2)](https://manpages.debian.org/unstable/manpages-dev/accept.2.en.html) |
+| 44 | 369 | sendto | int, void *, size_t, unsigned, struct sockaddr *, int | [sendto(2)](https://manpages.debian.org/unstable/manpages-dev/sendto.2.en.html) |
+| 45 | 371 | recvfrom | int, void *, size_t, unsigned, struct sockaddr *, int * | [recvfrom(2)](https://manpages.debian.org/unstable/manpages-dev/recvfrom.2.en.html) |
+| 46 | 370 | sendmsg | int fd, struct user_msghdr *msg, unsigned flags | [sendmsg(2)](https://manpages.debian.org/unstable/manpages-dev/sendmsg.2.en.html) |
+| 47 | 372 | recvmsg | int fd, struct user_msghdr *msg, unsigned flags | [recvmsg(2)](https://manpages.debian.org/unstable/manpages-dev/recvmsg.2.en.html) |
+| 48 | 373 | shutdown | int, int | [shutdown(2)](https://manpages.debian.org/unstable/manpages-dev/shutdown.2.en.html) |
+| 49 | 361 | bind | int, struct sockaddr *, int | [bind(2)](https://manpages.debian.org/unstable/manpages-dev/bind.2.en.html) |
+| 50 | 363 | listen | int, int | [listen(2)](https://manpages.debian.org/unstable/manpages-dev/listen.2.en.html) |
+| 51 | 367 | getsockname | int, struct sockaddr *, int * | [getsockname(2)](https://manpages.debian.org/unstable/manpages-dev/getsockname.2.en.html) |
+| 52 | 368 | getpeername | int, struct sockaddr *, int * | [getpeername(2)](https://manpages.debian.org/unstable/manpages-dev/getpeername.2.en.html) |
+| 53 | 360 | socketpair | int, int, int, int * | [socketpair(2)](https://manpages.debian.org/unstable/manpages-dev/socketpair.2.en.html) |
+| 54 | 366 | setsockopt | int fd, int level, int optname, char *optval, int optlen | [setsockopt(2)](https://manpages.debian.org/unstable/manpages-dev/setsockopt.2.en.html) |
+| 55 | 365 | getsockopt | int fd, int level, int optname, char *optval, int *optlen | [getsockopt(2)](https://manpages.debian.org/unstable/manpages-dev/getsockopt.2.en.html) |
 | 56 | 120 | clone | unsigned long, unsigned long, int *, unsigned long, int * | [clone(2)](https://manpages.debian.org/unstable/manpages-dev/clone.2.en.html) |
 | 57 | 2 | fork | No arguments | [fork(2)](https://manpages.debian.org/unstable/manpages-dev/fork.2.en.html) |
 | 58 | 190 | vfork | No arguments | [vfork(2)](https://manpages.debian.org/unstable/manpages-dev/vfork.2.en.html) |
@@ -69,16 +77,16 @@ sidebar_position: 1
 | 61 | 114 | wait4 | pid_t pid, int *stat_addr, int options, struct rusage *ru | [wait4(2)](https://manpages.debian.org/unstable/manpages-dev/wait4.2.en.html) |
 | 62 | 37 | kill | pid_t pid, int sig | [kill(2)](https://manpages.debian.org/unstable/manpages-dev/kill.2.en.html) |
 | 63 | 122 | uname | struct new_utsname *name | [uname(2)](https://manpages.debian.org/unstable/manpages-dev/uname.2.en.html) |
-| 64 | 64 | semget | key_t key, int nsems, int semflg | [semget(2)](https://manpages.debian.org/unstable/manpages-dev/semget.2.en.html) |
-| 65 | 66 | semop | int semid, struct sembuf *sops, unsigned nsops | [semop(2)](https://manpages.debian.org/unstable/manpages-dev/semop.2.en.html) |
-| 66 | 65 | semctl | int semid, int semnum, int cmd, unsigned long arg | [semctl(2)](https://manpages.debian.org/unstable/manpages-dev/semctl.2.en.html) |
-| 67 | 100 | shmdt | char *shmaddr | [shmdt(2)](https://manpages.debian.org/unstable/manpages-dev/shmdt.2.en.html) |
-| 68 | 68 | msgget | key_t key, int msgflg | [msgget(2)](https://manpages.debian.org/unstable/manpages-dev/msgget.2.en.html) |
-| 69 | 70 | msgsnd | int msqid, struct msgbuf *msgp, size_t msgsz, int msgflg | [msgsnd(2)](https://manpages.debian.org/unstable/manpages-dev/msgsnd.2.en.html) |
-| 70 | 69 | msgrcv | int msqid, struct msgbuf *msgp, size_t msgsz, long msgtyp, int msgflg | [msgrcv(2)](https://manpages.debian.org/unstable/manpages-dev/msgrcv.2.en.html) |
-| 71 | 71 | msgctl | int msqid, int cmd, struct msqid_ds *buf | [msgctl(2)](https://manpages.debian.org/unstable/manpages-dev/msgctl.2.en.html) |
+| 64 | 393 | semget | key_t key, int nsems, int semflg | [semget(2)](https://manpages.debian.org/unstable/manpages-dev/semget.2.en.html) |
+| 65 | - (semtimedop = 420) | semop | int semid, struct sembuf *sops, unsigned nsops | [semop(2)](https://manpages.debian.org/unstable/manpages-dev/semop.2.en.html) |
+| 66 | 394 | semctl | int semid, int semnum, int cmd, unsigned long arg | [semctl(2)](https://manpages.debian.org/unstable/manpages-dev/semctl.2.en.html) |
+| 67 | 398 | shmdt | char *shmaddr | [shmdt(2)](https://manpages.debian.org/unstable/manpages-dev/shmdt.2.en.html) |
+| 68 | 399 | msgget | key_t key, int msgflg | [msgget(2)](https://manpages.debian.org/unstable/manpages-dev/msgget.2.en.html) |
+| 69 | 400 | msgsnd | int msqid, struct msgbuf *msgp, size_t msgsz, int msgflg | [msgsnd(2)](https://manpages.debian.org/unstable/manpages-dev/msgsnd.2.en.html) |
+| 70 | 401 | msgrcv | int msqid, struct msgbuf *msgp, size_t msgsz, long msgtyp, int msgflg | [msgrcv(2)](https://manpages.debian.org/unstable/manpages-dev/msgrcv.2.en.html) |
+| 71 | 402 | msgctl | int msqid, int cmd, struct msqid_ds *buf | [msgctl(2)](https://manpages.debian.org/unstable/manpages-dev/msgctl.2.en.html) |
 | 72 | 55 | fcntl | unsigned int fd, unsigned int cmd, unsigned long arg | [fcntl(2)](https://manpages.debian.org/unstable/manpages-dev/fcntl.2.en.html) |
-| 73 | 131 | flock | unsigned int fd, unsigned int cmd | [flock(2)](https://manpages.debian.org/unstable/manpages-dev/flock.2.en.html) |
+| 73 | 143 | flock | unsigned int fd, unsigned int cmd | [flock(2)](https://manpages.debian.org/unstable/manpages-dev/flock.2.en.html) |
 | 74 | 118 | fsync | unsigned int fd | [fsync(2)](https://manpages.debian.org/unstable/manpages-dev/fsync.2.en.html) |
 | 75 | 148 | fdatasync | unsigned int fd | [fdatasync(2)](https://manpages.debian.org/unstable/manpages-dev/fdatasync.2.en.html) |
 | 76 | 92 | truncate | const char *path, long length | [truncate(2)](https://manpages.debian.org/unstable/manpages-dev/truncate.2.en.html) |
@@ -136,7 +144,7 @@ sidebar_position: 1
 | 128 | 177 | rt_sigtimedwait | const sigset_t *uthese, siginfo_t *uinfo, const struct __kernel_timespec *uts, size_t sigsetsize | [rt_sigtimedwait(2)](https://manpages.debian.org/unstable/manpages-dev/rt_sigtimedwait.2.en.html) |
 | 129 | 178 | rt_sigqueueinfo | pid_t pid, int sig, siginfo_t *uinfo | [rt_sigqueueinfo(2)](https://manpages.debian.org/unstable/manpages-dev/rt_sigqueueinfo.2.en.html) |
 | 130 | 179 | rt_sigsuspend | sigset_t *unewset, size_t sigsetsize | [rt_sigsuspend(2)](https://manpages.debian.org/unstable/manpages-dev/rt_sigsuspend.2.en.html) |
-| 131 | 131 | sigaltstack | const struct sigaltstack *uss, struct sigaltstack *uoss | [sigaltstack(2)](https://manpages.debian.org/unstable/manpages-dev/sigaltstack.2.en.html) |
+| 131 | 186 | sigaltstack | const struct sigaltstack *uss, struct sigaltstack *uoss | [sigaltstack(2)](https://manpages.debian.org/unstable/manpages-dev/sigaltstack.2.en.html) |
 | 132 | 30 | utime | char *filename, struct utimbuf *times | [utime(2)](https://manpages.debian.org/unstable/manpages-dev/utime.2.en.html) |
 | 133 | 14 | mknod | const char *filename, umode_t mode, unsigned dev | [mknod(2)](https://manpages.debian.org/unstable/manpages-dev/mknod.2.en.html) |
 | 134 | 86 | uselib | Not implemented | [uselib(2)](https://manpages.debian.org/unstable/manpages-dev/uselib.2.en.html) |
@@ -144,13 +152,13 @@ sidebar_position: 1
 | 136 | 62 | ustat | unsigned dev, struct ustat *ubuf | [ustat(2)](https://manpages.debian.org/unstable/manpages-dev/ustat.2.en.html) |
 | 137 | 99 | statfs | const char * path, struct statfs *buf | [statfs(2)](https://manpages.debian.org/unstable/manpages-dev/statfs.2.en.html) |
 | 138 | 100 | fstatfs | unsigned int fd, struct statfs *buf | [fstatfs(2)](https://manpages.debian.org/unstable/manpages-dev/fstatfs.2.en.html) |
-| 139 | 139 | sysfs | int option, unsigned long arg1, unsigned long arg2 | [sysfs(2)](https://manpages.debian.org/unstable/manpages-dev/sysfs.2.en.html) |
+| 139 | 135 | sysfs | int option, unsigned long arg1, unsigned long arg2 | [sysfs(2)](https://manpages.debian.org/unstable/manpages-dev/sysfs.2.en.html) |
 | 140 | 96 | getpriority | int which, int who | [getpriority(2)](https://manpages.debian.org/unstable/manpages-dev/getpriority.2.en.html) |
 | 141 | 97 | setpriority | int which, int who, int niceval | [setpriority(2)](https://manpages.debian.org/unstable/manpages-dev/setpriority.2.en.html) |
-| 142 | 126 | sched_setparam | pid_t pid, struct sched_param *param | [sched_setparam(2)](https://manpages.debian.org/unstable/manpages-dev/sched_setparam.2.en.html) |
-| 143 | 127 | sched_getparam | pid_t pid, struct sched_param *param | [sched_getparam(2)](https://manpages.debian.org/unstable/manpages-dev/sched_getparam.2.en.html) |
-| 144 | 142 | sched_setscheduler | pid_t pid, int policy, struct sched_param *param | [sched_setscheduler(2)](https://manpages.debian.org/unstable/manpages-dev/sched_setscheduler.2.en.html) |
-| 145 | 143 | sched_getscheduler | pid_t pid | [sched_getscheduler(2)](https://manpages.debian.org/unstable/manpages-dev/sched_getscheduler.2.en.html) |
+| 142 | 154 | sched_setparam | pid_t pid, struct sched_param *param | [sched_setparam(2)](https://manpages.debian.org/unstable/manpages-dev/sched_setparam.2.en.html) |
+| 143 | 155 | sched_getparam | pid_t pid, struct sched_param *param | [sched_getparam(2)](https://manpages.debian.org/unstable/manpages-dev/sched_getparam.2.en.html) |
+| 144 | 156 | sched_setscheduler | pid_t pid, int policy, struct sched_param *param | [sched_setscheduler(2)](https://manpages.debian.org/unstable/manpages-dev/sched_setscheduler.2.en.html) |
+| 145 | 157 | sched_getscheduler | pid_t pid | [sched_getscheduler(2)](https://manpages.debian.org/unstable/manpages-dev/sched_getscheduler.2.en.html) |
 | 146 | 159 | sched_get_priority_max | int policy | [sched_get_priority_max(2)](https://manpages.debian.org/unstable/manpages-dev/sched_get_priority_max.2.en.html) |
 | 147 | 160 | sched_get_priority_min | int policy | [sched_get_priority_min(2)](https://manpages.debian.org/unstable/manpages-dev/sched_get_priority_min.2.en.html) |
 | 148 | 161 | sched_rr_get_interval | pid_t pid, struct __kernel_timespec *interval | [sched_rr_get_interval(2)](https://manpages.debian.org/unstable/manpages-dev/sched_rr_get_interval.2.en.html) |
@@ -159,11 +167,11 @@ sidebar_position: 1
 | 151 | 152 | mlockall | int flags | [mlockall(2)](https://manpages.debian.org/unstable/manpages-dev/mlockall.2.en.html) |
 | 152 | 153 | munlockall | No arguments | [munlockall(2)](https://manpages.debian.org/unstable/manpages-dev/munlockall.2.en.html) |
 | 153 | 111 | vhangup | No arguments | [vhangup(2)](https://manpages.debian.org/unstable/manpages-dev/vhangup.2.en.html) |
-| 154 | 140 | modify_ldt | int func, void *ptr, unsigned long bytecount | [modify_ldt(2)](https://manpages.debian.org/unstable/manpages-dev/modify_ldt.2.en.html) |
+| 154 | 123 | modify_ldt | int func, void *ptr, unsigned long bytecount | [modify_ldt(2)](https://manpages.debian.org/unstable/manpages-dev/modify_ldt.2.en.html) |
 | 155 | 217 | pivot_root | const char *new_root, const char *put_old | [pivot_root(2)](https://manpages.debian.org/unstable/manpages-dev/pivot_root.2.en.html) |
 | 156 | 149 | _sysctl | No arguments (deprecated/not implemented) | [_sysctl(2)](https://manpages.debian.org/unstable/manpages-dev/_sysctl.2.en.html) |
 | 157 | 172 | prctl | int option, unsigned long arg2, unsigned long arg3, unsigned long arg4, unsigned long arg5 | [prctl(2)](https://manpages.debian.org/unstable/manpages-dev/prctl.2.en.html) |
-| 158 | 172 | arch_prctl | int option, unsigned long arg2 | [arch_prctl(2)](https://manpages.debian.org/unstable/manpages-dev/arch_prctl.2.en.html) |
+| 158 | 384 | arch_prctl | int option, unsigned long arg2 | [arch_prctl(2)](https://manpages.debian.org/unstable/manpages-dev/arch_prctl.2.en.html) |
 | 159 | 124 | adjtimex | struct __kernel_timex *txc_p | [adjtimex(2)](https://manpages.debian.org/unstable/manpages-dev/adjtimex.2.en.html) |
 | 160 | 75 | setrlimit | unsigned int resource, struct rlimit *rlim | [setrlimit(2)](https://manpages.debian.org/unstable/manpages-dev/setrlimit.2.en.html) |
 | 161 | 61 | chroot | const char *filename | [chroot(2)](https://manpages.debian.org/unstable/manpages-dev/chroot.2.en.html) |

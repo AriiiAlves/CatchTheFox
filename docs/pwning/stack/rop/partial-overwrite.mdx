@@ -12,17 +12,19 @@ Os endereços de memória como `0x7ffd4a3b12e0` são compostos de:
 - Bytes mais significativos: `0x7ffd4a3b ` - Randomizado pelo ASLR!
 - Bytes menos significativos: `0x12e0` - Muitas vezes previsível ou com variação limitada
 
-Com ASLR, geralmente apenas os primeiros bytes (mais significativos) são randomizados. Os últimos bytes (menos significativos) frequentemente mantêm padrões.
+O ASLR randomiza a base de cada região (binário, libc, stack...) em múltiplos de uma **página** (4096 bytes = `0x1000`). Isso significa que **os 12 bits menos significativos (os 3 últimos dígitos hexadecimais) de qualquer endereço nunca mudam**: eles são o offset dentro da página, e dependem só do binário.
 
 ```
 Mesmo programa, execuções diferentes:
 
-Execução 1: 0x7f8a1b45[1200]  ← ASLR muda ESTA parte
-Execução 2: 0x7f4c2d89[1200]  ← ASLR muda ESTA parte
-Execução 3: 0x7e9b3fa2[1200]  ← ASLR muda ESTA parte
+Execução 1: 0x7f8a1b451[200]  ← ASLR muda ESTA parte
+Execução 2: 0x7f4c2d896[200]  ← ASLR muda ESTA parte
+Execução 3: 0x7e9b3fa2f[200]  ← ASLR muda ESTA parte
                          ↑
-               Esta parte geralmente FICA IGUAL (offset relativo)
+               Estes 3 dígitos SEMPRE ficam iguais
 ```
+
+Na prática: sobrescrever **1 byte** (os 2 últimos dígitos) do endereço funciona sempre. Sobrescrever **2 bytes** (4 dígitos) deixa 1 dígito (4 bits) aleatório, então o exploit funciona 1 vez a cada 16 tentativas, o que é perfeitamente aceitável em CTF (basta repetir).
 
 Imagine o programa inteiro como uma caixa. Você pode sempre mudar a caixa de lugar em um galpão, mas todas as partículas do papelão estarão à uma mesma distância umas das outras, certo?
 
@@ -41,3 +43,17 @@ O Partial Overwrite funciona:
 - Se você sabe que os offsets relativos são consistentes (gadget sempre estará a `+0x50` bytes)
 
 Assim, a tática é **reutilizar um endereço já existente na pilha** e **obter todos os gadgets a partir do endereço relativo dos gadgets em relação a ele**.
+
+## Exemplo
+
+Suponha um binário com PIE em que o `return address` da função vulnerável aponta para `main+0x5a`, cujo endereço real termina em `...1da`. Queremos chamar `win`, que fica em `...1f6` (mesma página, mesmo prefixo). Em vez de sobrescrever os 8 bytes do `return address`, sobrescrevemos **só o último byte**:
+
+```py
+payload = b'A' * offset   # padding até o return address
+payload += b'\xf6'        # troca só o byte 0xda por 0xf6. Os outros 7 bytes ficam intactos
+p.send(payload)           # send, e não sendline: o \n sobrescreveria o próximo byte!
+```
+
+Isso exige que o input seja lido por algo que não adicione nada no fim (`read` em vez de `gets`/`fgets`, que colocariam `\n` ou `\0`). Se a função alvo estiver em outra página, mas a menos de `0x10000` bytes, sobrescreva 2 bytes com `p16(0x?f6)` e tente 16 vezes (o `?` é o dígito aleatório).
+
+O mesmo raciocínio vale para a heap (sobrescrever o último byte de um ponteiro `fd` para apontar para outro chunk próximo) e para ponteiros da libc guardados na stack ou na GOT.

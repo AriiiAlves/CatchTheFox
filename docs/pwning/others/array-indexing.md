@@ -34,7 +34,7 @@ Fique atento se o array é de `int`, `float`, etc, pois o tamanho de cada bloco 
 
 Basicamente, acessar os índices de um array de inteiros é colocar um "gancho" em um endereço de memória e ir somando 4 bytes para chegar a cada índice, certo?
 
-Porém, se acessarmos o índice -1, o compilador irá ler: `array[-1] = 0x7ffd1234 (-1) * 0x4`. Estaremos acessando uma parte da memória que não tem nada a ver com o array, pois passamos do limite dele (de 0 a n). É um vazamento de memória (memory leak).
+Porém, se acessarmos o índice -1, o programa irá ler: `array[-1] = 0x7ffd1234 + (-1) * 0x4 = 0x7ffd1230`. Estaremos acessando uma parte da memória que não tem nada a ver com o array, pois passamos do limite dele (de 0 a n-1). O C não verifica limites de array: o compilador só gera a conta `base + índice * tamanho`, e o processador acessa o que estiver lá. Se o programa imprime esse valor, temos um vazamento de informação (*information leak*).
 
 Isso só pode ser explorado se pudermos manipular o índice do array:
 
@@ -52,9 +52,11 @@ int main() {
 }
 ```
 
-Lembre-se de que o array está no Stack Frame da função, assim como toda variável declarada. Assim, usando os índices, estamos navegando pela stack.
+Lembre-se de que o array está no Stack Frame da função, assim como toda variável declarada. Assim, usando os índices, estamos navegando pela stack: índices negativos vão para endereços menores (outras variáveis locais, outros frames) e índices maiores que `n-1` vão para endereços maiores (Canary, `RBP` salvo, `return address`, argumentos...). Se o array for global (na `.bss`), navegamos pela `.bss`/`.data` e podemos alcançar a GOT, por exemplo.
 
-> Nota: Nem sempre as variáveis ficam na stack na ordem em que foram declaradas. Otimizações/Paddings (alinhamento de stack) na compilação podem alterar essa ordem. Sempre verifique.
+Com `int` (4 bytes), `arr[index]` alcança o endereço `arr + 4 * index`. Para calcular o índice de um alvo: `index = (alvo - arr) / 4`. Ex: se `arr` está em `rbp-0x30` e o `return address` em `rbp+0x8`, o índice é `(0x30 + 0x8) / 4 = 14`.
+
+> Nota: Nem sempre as variáveis ficam na stack na ordem em que foram declaradas. Otimizações/Paddings (alinhamento de stack) na compilação podem alterar essa ordem. Sempre verifique no GDB ou no Ghidra.
 
 ## Consequências do Out-of-Bounds
 
@@ -80,3 +82,21 @@ int arr[3] = {0};
 
 arr[10] = 1;  // Pode sobrescrever admin_flag!
 ```
+
+Se o programa deixa escolher **índice e valor** (`arr[index] = value`), isso é uma escrita quase arbitrária na stack (ou na `.bss`): dá para sobrescrever o `return address` com o endereço de uma função `win` sem nenhum Buffer Overflow, e sem tocar no Canary (pulamos por cima dele). Em 64 bits, um endereço de 8 bytes ocupa dois `int`s: escreva a metade baixa em `arr[i]` e a metade alta em `arr[i+1]`.
+
+### Verificações incompletas
+
+O erro de programação mais comum é verificar só um lado do limite:
+
+```c
+if (index < 10) {        // esquece de checar index < 0
+    arr[index] = value;  // index = -5 passa!
+}
+
+if (index <= 10) {       // off-by-one: índices válidos vão de 0 a 9
+    arr[index] = value;  // index = 10 passa e escreve logo depois do array
+}
+```
+
+Outro clássico é a mistura de tipos: a verificação é feita com `int` (com sinal, então `-5 < 10` passa), mas o índice é usado em uma conta sem sinal ou como `size_t`, virando um número gigante. Veja [Integer Overflow](./integer-overflow.md).

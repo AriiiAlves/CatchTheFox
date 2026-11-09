@@ -12,7 +12,9 @@ free(ptr);                // Libera a memória
 strcpy(ptr, "data");      // ERRO: Usa ptr depois de free! ← USE-AFTER-FREE
 ```
 
-Usar `free()` não muda o valor da variável `*ptr`, apenas faz o processo interno liberar o chunk na heap. Após isso, a memória pode ser reutilizada por outras alocações ou reutilizada pelo próprio alocador.
+Usar `free()` não muda o valor da variável `ptr` (ela continua guardando o mesmo endereço), apenas faz o alocador marcar o chunk como livre e colocá-lo em uma bin. Após isso, a memória pode ser reutilizada por outras alocações, e o próprio alocador escreve metadados (`fd`, `bk`, `key`) nos primeiros bytes dos dados.
+
+A correção é simples (`ptr = NULL` depois do `free`), e é justamente o que programas vulneráveis esquecem de fazer. Em CTFs, UAF aparece muito em desafios estilo "notes" (criar, editar, ver e deletar notas), em que o `delete` dá `free` mas não zera o ponteiro no array de notas, e `edit`/`view` continuam funcionando na nota deletada.
 
 Podemos imaginar o UAF como um "portal mágico" para a heap, que nos permite espiar ou modificar a heap. Mesmo após o `free`, `ptr` continua apontando para o mesmo endereço.
 
@@ -36,6 +38,11 @@ printf("Buffer: %s\n", buffer);  // Pode imprimir lixo ou dados de outra alocaç
 // Escrita
 strcpy(buffer, "Novos dados");  // Pode sobrescrever estruturas do heap!
 ```
+
+Na prática, isso vira:
+
+- **Leitura** de um chunk livre → vazar o `fd` (endereço da heap, ou da `libc` se o chunk estiver na unsorted bin. Veja [Vazando libc](./malloc-consolidate.mdx) e [Tcache](./tcache.mdx#libc-leak-com-tcache))
+- **Escrita** em um chunk livre → sobrescrever o `fd` e controlar o próximo `malloc` ([Tcache Poisoning](./tcache.mdx#tcache-poisoning) / [Double Free](./double-free.mdx)), ou sobrescrever a `key` para permitir double free
 
 ## Execução
 

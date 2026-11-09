@@ -9,10 +9,10 @@ A heap é uma área de memória diferente da stack. Nela, variáveis podem ser d
 Por exemplo:
 
 ```c
-int funcao{
+void funcao() {
     int x = 10; // Essa variável vai sumir quando a função retornar, está na stack.
 
-    int *array = malloc(4 * sizeof(int)); // Reservamos (alocamos) espaço para quatro inteiros. Recemos de volta um ponteiro.
+    int *array = malloc(4 * sizeof(int)); // Reservamos (alocamos) espaço para quatro inteiros. Recebemos de volta um ponteiro.
     array[0] = 101; // Acessamos o ponteiro e definimos valor = 101 no endereço na heap.
     array[1] = 102; // Acessamos o ponteiro e definimos valor = 102 no endereço na heap.
 
@@ -20,23 +20,25 @@ int funcao{
 
     // Da mesma forma, para variável simples
     int *y = malloc(sizeof(int));
-    y* = 15;
+    *y = 15;
 
-    free(y)
+    free(y);
 }
 ```
 
 No C, podemos alocar memória com:
 
-- `malloc(n)` - Aloca n bytes de memória. Se pedimos 4 bytes (um inteiro), teremos 4 bytes reservados na heap. O malloc aloca do jeito que está, então se temos inicialmente `0x41256112` na heap (lixo de memória), o lixo continua ali.
-- `calloc(n)` - Aloca n bytes de memória, mas preenche com zeros o local onde alocamos.
+- `malloc(n)` - Aloca n bytes de memória. Se pedimos 4 bytes (um inteiro), teremos 4 bytes reservados na heap. O malloc aloca do jeito que está, então se temos inicialmente `0x41256112` na heap (lixo de memória, de um chunk liberado antes), o lixo continua ali. Isso é a base de vários leaks.
+- `calloc(n, tamanho)` - Aloca `n * tamanho` bytes de memória, mas preenche com zeros o local onde alocamos.
+- `realloc(ptr, n)` - Redimensiona uma alocação. Pode devolver o mesmo ponteiro ou mover os dados para um chunk novo (e liberar o antigo).
+- `free(ptr)` - Libera. Note que o `free` **não zera o ponteiro** nem os dados: a variável continua apontando para o mesmo lugar (veja [Use-After-Free](./uaf.mdx)).
 
 O que `malloc` e `calloc` retornam é um ponteiro. Ou seja:
 
 1. `malloc(4)`
 2. Pedimos para reservar 4 bytes de memória na heap
 3. malloc reserva e retorna o ponteiro/endereço do início da memória reservada. Uma variável `y` recebe esse ponteiro/endereço.
-4. quando fazemos `y* = 15`, o `*` acessa o endereço de `y` e coloca nosso dado lá. O lixo que estava lá some após essa atribuição.
+4. quando fazemos `*y = 15`, o `*` acessa o endereço apontado por `y` e coloca nosso dado lá. O lixo que estava lá some após essa atribuição.
 5. Quando fazemos `free(y)`, dizemos ao programa que aquele espaço na heap não vai ser mais usado. Assim, outra variável pode ocupar esse espaço futuramente.
 
 ```
@@ -150,11 +152,11 @@ Um chunk alocado consiste de 4 partes:
     ![Overlapping](/docs-img/overlapping_chunk.png)
 </div>
 
-2. `size` com `AMP` - Contém tamanho do chunk atual. Tanto em 32 quanto 64 bits, deve ser um múltiplo de 4 ou 8. Assim, os últimos 3 bits nunca são usados, e usam-se eles para verificar 3 flags:
+2. `size` com `AMP` - Contém tamanho do chunk atual (incluindo o header). O tamanho é sempre múltiplo de 16 em 64 bits (e de 8 em 32 bits, ou 16 nas glibc modernas). Assim, os últimos 3 bits nunca são usados pelo tamanho, e usam-se eles para guardar 3 flags:
     1. `A`, NON_MAIN_ARENA - A arena principal usa a heap da aplicação. Outras arenas usam mmap'd heaps. Se o bit é 0, o chunk vem da main arena e da main heap. Se é 1, o chunk vem de mmap'd memory e a localização da heap pode ser computada a partir do endereço do chunk.
     2. `M`, IS_MAPPED - Se o bit é 1, o chunk foi alocado com `mmap` e não faz parte da heap.
-    3. `P`, PREV_INUSE - Se o bit é 1, o chunk anterior (adjascente) está sendo usado. Caso seja 0, o chunk anterior está livre.
-4. `user_data` - Contém os dados que o programa quiser guardar. O endereço retornado pelo `malloc` é o início de `user_data`.
+    3. `P`, PREV_INUSE - Se o bit é 1, o chunk anterior (adjascente) está sendo usado. Caso seja 0, o chunk anterior está livre (e `prev_size` é válido).
+3. `user_data` - Contém os dados que o programa quiser guardar. O endereço retornado pelo `malloc` é o início de `user_data`. Em 64 bits, `malloc(n)` cria um chunk de tamanho `(n + 8) arredondado para cima até um múltiplo de 16`, com mínimo de `0x20`. Ex: `malloc(0x18)` e `malloc(0x10)` geram chunks de `0x20`; `malloc(0x20)` gera um chunk de `0x30`. (Os 8 bytes a mais são o `size`. O `prev_size` do próximo chunk é "emprestado" como espaço de dados, como explicado acima)
 
 Assim, para chunks alocados:
 
@@ -174,10 +176,12 @@ Um chunk livre consiste de 4 partes:
 
 1. `prev_size` ou `user_data` - Já comentado
 2. `size` com `AMP` - Já comentado
-3. `fwd`, `bkd`
-    1. `fwd` - Endereço do próximo chunk livre
-    2. `bkd` - Endereço do chunk livre anterior 
-5. `fwd_nextsize`, `bkd_nextsize` - Usados para otimizar a busca por chunks livres apenas nos **large bins**. 
+3. `fd`, `bk` (*forward* e *backward*, às vezes escritos `fwd` e `bkd`)
+    1. `fd` - Endereço do próximo chunk livre da lista (bin)
+    2. `bk` - Endereço do chunk livre anterior 
+4. `fd_nextsize`, `bk_nextsize` - Usados para otimizar a busca por chunks livres apenas nos **large bins**. 
+
+Repare que `fd` e `bk` ficam **exatamente onde ficavam os dados do usuário** quando o chunk estava alocado. Isso é a raiz de boa parte dos ataques à heap: se conseguirmos ler um chunk livre (Use-After-Free), vazamos ponteiros; se conseguirmos escrever nele, controlamos para onde a lista aponta.
     1. `fwd_nextsize` - Endereço para o próximo chunk na lista de tamanhos, sendo este **menor** que o chunk atual
     2. `bkd_nextsize` - Endereço para o chunk anterior na lista de tamanhos, sendo este **maior** que o chunk atual.
 
@@ -207,8 +211,8 @@ Bins são listas organizadas de chunks livres no gerenciador de memória do glib
 Armazenam chunks pequenos em uma lista simples encadeada. Os chunks, **muito pequenos**, **são reusados rapidamente e de modo eficiente**. Devido a isso, chunks na fastbin não se consolidam (não são absorvidos por chunks livres próximos, de modo a formar um maior), apenas em casos extremos (explicados mais adiante).
 
 - **Localização**: `fastbinsY[]` (Os fast bins não ficam com os outros bins em `bins[]`)
-- **Faixa de tamanhos**: 16 a 80 bytes (arquitetura x86) ou 32 a 160 bytes (arquitetura x64)
-- **Número de bins**: 10 bins (padrão no glibc moderno), cada bin possuindo uma faixa de tamanhos diferentes (em bytes).
+- **Faixa de tamanhos**: chunks de até `0x40` bytes (32 bits) ou `0x80` bytes (64 bits) por padrão (variável `global_max_fast`). O limite máximo configurável é `0x50`/`0xa0`.
+- **Número de bins**: 10 bins, mas por padrão só os 7 primeiros são usados (`0x20`, `0x30`, ..., `0x80` em 64 bits). Cada bin guarda chunks de um **único** tamanho.
 - **Estrutura**: LIFO - Last In First Out - O chunk mais novo é o primeiro a ser alocado. `HEAD` aponta para o primeiro chunk e é `0` se o fastbin está vazio. É uma lista encadeada simples (só `fd`)
 
 Chunk livre em fast bins:
@@ -226,14 +230,15 @@ Chunk livre em fast bins:
 
 Organização por Tamanho do chunk:
 
-| Índice | Tamanho (x86) | Tamanho (x64) |
-|--------|---------------|---------------|
-| fastbinsY[0] | 0x20 - 0x2f bytes | 0x40 - 0x4f bytes |
-| fastbinsY[1] | 0x30 - 0x3f bytes | 0x50 - 0x5f bytes |
-| fastbinsY[2] | 0x40 - 0x4f bytes | 0x60 - 0x6f bytes |
+| Índice | Tamanho do chunk (x86, 32 bits) | Tamanho do chunk (x64) | `malloc(n)` em x64 |
+|--------|---------------|---------------|---------------|
+| fastbinsY[0] | 0x10 | 0x20 | `n` de 0 a 0x18 |
+| fastbinsY[1] | 0x18 | 0x30 | `n` de 0x19 a 0x28 |
+| fastbinsY[2] | 0x20 | 0x40 | `n` de 0x29 a 0x38 |
 | ... | ... | ... | ... |
+| fastbinsY[6] | 0x40 | 0x80 | `n` de 0x69 a 0x78 |
 
-Podemos ver tudo isso na prática:
+Podemos ver tudo isso na prática (obs: em glibc ≥ 2.26, esses chunks pequenos vão primeiro para o [tcache](./tcache.mdx), que também é LIFO, então o resultado é o mesmo):
 
 ```c
 #include <stdio.h>
@@ -382,18 +387,18 @@ Chunk livre em large bins:
 +---------------+---------------+
 ```
 
-Os large bins são organizados em grupos com intervalos crescentes, com intervalo de 128 bytes para cada um:
+Os large bins são organizados em grupos: quanto maior o tamanho, maior a faixa que cada bin cobre (em 64 bits):
 
-| Grupo | Índices | Intervalo (bytes) |
-|-------|---------|-------------------|
-| 1 | 64-71 | 1024-1151 | 
-| 2 | 72-79 | 1152-1279 | 
-| 3 | 80-87 | 1280-1407 | 
-| 4 | 88-95 | 1408-1535 | 
-| 5 | 96-103 | 1536-1663 | 
-| 6 | 104-111 | 1664-1791 | 
-| 7 | 112-119 | 1792-1919 | 
-| 8 | 120-126 | 1920-2047 |
+| Grupo | Quantidade de bins | Índices | Faixa de cada bin | Tamanhos cobertos |
+|-------|--------------------|---------|-------------------|-------------------|
+| 1 | 32 | 64-95 | 64 bytes | 0x400 - 0xc3f |
+| 2 | 16 | 96-111 | 512 bytes | 0xc40 - 0x29ff |
+| 3 | 8 | 112-119 | 4096 bytes | 0x2a00 - 0xaa3f |
+| 4 | 4 | 120-123 | 32768 bytes | 0xaa40 - 0x2a9ff |
+| 5 | 2 | 124-125 | 262144 bytes | 0x2aa00 - 0xaa9ff |
+| 6 | 1 | 126 | o resto | ≥ 0xaaa00 |
+
+Ex: o bin 64 guarda chunks de `0x400` a `0x43f`, o bin 65 de `0x440` a `0x47f`, e assim por diante.
 
 #### Head e Tail
 
@@ -403,24 +408,21 @@ Cada bin é representado por uma lista com dois valores, `HEAD` (cabeça) e `TAI
 
 Quando `malloc()` precisa de um chunk:
 
-- Se o tamanho requerido é do tamanho **fastbin**, procura por chunks livres na **fast bin**. 
+- (glibc ≥ 2.26) Se há um chunk do tamanho exato no **[tcache](./tcache.mdx)**, **retorna** ele. Isso acontece antes de tudo.
+- Se o tamanho requerido é do tamanho **fastbin**, procura por chunks livres na **fast bin** correspondente. 
     - Se encontrar um chunk livre, **retorna** ele.
-- Se o tamanho requerido é do tamanho **smallbin**, procura por chunks livres na **smallbin**. 
+- Se o tamanho requerido é do tamanho **smallbin**, procura por chunks livres na **smallbin** correspondente (tamanho exato). 
     - Se encontrar um chunk livre, **retorna** ele.
-- Se o tamanho requerido é do tamanho **largebin**, primeiro consolidamos os **largebins** com **`malloc_consolidate()`**.
-    - Se encontrar um chunk livre, **retorna** ele.
-- Se ainda não encontrarmos, olhamos em **unsorted bin**.
-    - Se estiver vazio, aumentamos a heap **movendo o top chunk (_próximo tópico_) para trás e fazendo espaço** para ceder chunk
-    - Se não há espaço no top chunk, faz-se a **consolidação do fastbin**
-    - Se não há chunks suficientes na fastbin, chama-se `sysmalloc`que chama `mmap`, **alocando o chunk no Memory Map Region** (muito espaço).
+- Se o tamanho requerido é do tamanho **largebin**, primeiro consolidamos as **fastbins** com **`malloc_consolidate()`** (junta os chunks livres adjacentes das fastbins e os move para a unsorted bin).
+- Percorre a **unsorted bin**. Para cada chunk ali:
+    - Se o tamanho for **exatamente** o pedido, **retorna** ele.
+    - Senão, **move o chunk para a small/large bin** certa (é aqui que a "ordenação" acontece).
+- Procura na **large bin** correspondente e, depois, nas bins de tamanhos maiores, pegando o menor chunk que caiba. Se o chunk for maior que o pedido, **divide em dois**: retorna a parte do tamanho certo e o resto (*remainder*) vai para a unsorted bin.
+- Se nada serviu, usa o **top chunk** (_próximo tópico_): corta um pedaço dele e retorna.
+- Se o top chunk é pequeno demais e ainda existem chunks nas fastbins, faz **`malloc_consolidate()`** e tenta de novo.
+- Se nada funcionou, chama-se `sysmalloc`, que **aumenta a heap** pedindo mais memória ao kernel com `brk` (ou, para pedidos grandes, usa `mmap` e devolve um chunk separado, com a flag `M`).
 
-Algoritmo comum a todos os bins:
-
-- Se o tamanho requerido é **igual ao tamanho do chunk na bin**, **retorna** o chunk.
-- Se é **menor**, **divide o chunk na bin em dois** e **retorna a porção com o tamanho correto**
-
-
-A fastbin faz sim consolidação, mas **na alocação** quando não há espaço, não no free.
+Em resumo: a fastbin **não consolida no `free`**, só quando `malloc_consolidate()` é chamado (por um pedido grande, ou quando o top chunk acaba). Chunks small/large, por outro lado, são consolidados com os vizinhos livres **no próprio `free`**, e vão para a unsorted bin. Um chunk que faz fronteira com o top chunk é absorvido por ele ao ser liberado (exceto se for do tamanho de fastbin/tcache).
 
 ### Top chunk
 
@@ -430,5 +432,7 @@ Se um novo chunk é alocado e não há chunks livres que sirvam, o top chunk enc
 
 Se o tamanho do chunk requerido é menor ou igual ao tamanho do top chunk, ele é quebrado em dois chunks - O return chunk (onde o top chunk estava) e o remainder chunk, que vira o novo top chunk com um tamanho reduzido.
 
-Se o tamanho é maior do que o top chunk pode lidar, glibc tenta consolidar fastbins. Se não há fastbins (ou não há espaço o suficiente), usa-se `sysmalloc`, que chama `mmap` (em sistemas que têm isso), alocando esse chunk no Memory Map Region.
+Se o tamanho é maior do que o top chunk pode lidar, glibc tenta consolidar fastbins. Se não há fastbins (ou não há espaço o suficiente), usa-se `sysmalloc`, que estende a heap com `brk` (o top chunk cresce) ou, se o pedido for grande (≥ 128 KB por padrão), chama `mmap` e aloca esse chunk separadamente, no Memory Map Region.
+
+O campo `size` do top chunk é um alvo clássico de ataque: veja [House of Force](./malloc-maleficarum/house-of-force.mdx).
 

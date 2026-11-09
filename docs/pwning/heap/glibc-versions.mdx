@@ -3,15 +3,17 @@ title: Resumo de ataques por versão da glibc
 sidebar_position: 9
 ---
 
-Em ataques à stack é mais fácil identificar o que pode ser feito, pois basta usar `pwndbg ./file` e sabemos o que é ou não possível. Essas informações são fáceis de obter pois as proteções à stack estão no nível de processador (Como NX, apenas tira a permissão de execução da Stack, e Relro também tem o mesmo conceito). Já ataques contra a heap não são tratados a nível de processador, mas são implementações na `glibc`. Se entendermos o que cada versão da glibc carrega, podemos guiar melhor o ataque a ser feito.
+Em ataques à stack é mais fácil identificar o que pode ser feito, pois basta usar `pwn checksec ./file` e sabemos o que é ou não possível: as proteções (NX, Canary, PIE, RELRO) são propriedades do binário, visíveis de fora. Já as proteções da heap não estão no binário: são verificações dentro do código do `malloc`/`free` da `glibc`, e mudam de versão para versão. Se entendermos o que cada versão da glibc carrega, podemos guiar melhor o ataque a ser feito.
 
 Para identificar a versão da libc de um binário:
 
 ```bash
-ldd ./binario | grep libc
-/lib/x86_64-linux-gnu/libc.so.6 --version
-strings libc.so.6 | grep "GNU C Library"
+ldd ./binario | grep libc          # qual libc o binário usa localmente
+/lib/x86_64-linux-gnu/libc.so.6    # executar a libc imprime a versão dela
+strings libc.so.6 | grep "GNU C Library"   # para uma libc fornecida pelo desafio
 ```
+
+Em CTFs, a libc do servidor costuma vir junto com o desafio. Use o [pwninit](https://github.com/io12/pwninit) ou o `patchelf` para rodar o binário localmente com essa libc (e o `ld` correspondente), senão os offsets não vão bater.
 
 ---
 
@@ -24,9 +26,10 @@ strings libc.so.6 | grep "GNU C Library"
 - Exploração facilitada em versões mais antigas sem safe-linking
 
 ## **Double Free**
-- **glibc < 2.26**: Sem proteções significativas
-- **glibc 2.26-2.31**: [Double-free checks](./double-free.mdx#fasttop-double-free-check) na fastbin
-- **glibc ≥ 2.32**: Safe-linking dificulta (mas não impede completamente)
+- **Fastbin (todas as versões modernas)**: só a verificação [fasttop](./double-free.mdx#fasttop-double-free-check) (o chunk liberado não pode ser o que está no topo da bin), contornada liberando outro chunk no meio
+- **glibc 2.26-2.28**: tcache **sem nenhuma verificação** de double free: `free(a); free(a);` funciona direto
+- **glibc ≥ 2.29**: [tcache key](./tcache.mdx#tcache-keys-glibc-229) detecta double free no tcache. Contorno: sobrescrever a `key` (UAF) antes do segundo `free`
+- **glibc ≥ 2.32**: Safe-linking dificulta usar o `fd` corrompido (precisa de leak da heap), mas não impede
 
 ## **Unlink Attack**
 - **glibc < 2.3.4**: [Unlink clássico](./unlink.mdx) sem verificações
@@ -36,8 +39,9 @@ strings libc.so.6 | grep "GNU C Library"
 
 ## **Tcache Poisoning**
 - **glibc < 2.26**: Tcache não existe
-- **glibc 2.26-2.31**: Extremamente fácil (sem checks)
-- **glibc ≥ 2.32**: Safe-linking XOR no fd pointer (ainda explorável com leak)
+- **glibc 2.26-2.31**: Extremamente fácil (sem checks no `fd`)
+- **glibc ≥ 2.32**: Safe-linking XOR no fd pointer (ainda explorável com leak da heap) + verificação de alinhamento (o alvo precisa ser múltiplo de 16)
+- **glibc ≥ 2.34**: sem `__malloc_hook`/`__free_hook`, então o alvo da escrita muda (ex: `environ` para vazar a stack e depois o return address, ou estruturas de `FILE`/`stdout`)
 
 ## **Libc Leak via Tcache**
 - **glibc ≥ 2.26**: Possível quando tcache está cheia (chunks vão para unsorted bin)
@@ -63,13 +67,13 @@ strings libc.so.6 | grep "GNU C Library"
 
 ## **Marcos Importantes de Mitigação**
 
-- **glibc 2.3.4 (2005)**: [Unlink hardening](./unlink.mdx#proteção-safe-unlinking-glibc-234), [Metadata Integrity Checks](./double-free.mdx#size-check-malloc)
-- **glibc 2.26 (2017)**: Introdução da [tcache](./tcache.mdx) (mudança massiva), [Double-free checks](./double-free.mdx#fasttop-double-free-check) na fastbin
-- **glibc 2.27 (2018)**: Tcache double-free check, Tcache size checks
-- **glibc 2.29 (2018)**: Tcache key (mitigação de double-free aprimorada - adicionou campo key nos chunks)
-- **glibc 2.29 (2019)**: [Top Chunk Integrity Check](./malloc-maleficarum/house-of-force.mdx#top-chunk-integrity-check)
-- **glibc 2.32 (2020)**: **Safe-linking** (XOR encoding em fd pointers)
-- **glibc 2.34 (2021)**: Remoção de malloc hooks (`__malloc_hook`, `__free_hook`, `__realloc_hook` removidos), mudanças estruturais internas.
+- **glibc 2.3.4 (2004)**: [Unlink hardening](./unlink.mdx#proteção-safe-unlinking-glibc-234), [Metadata Integrity Checks](./double-free.mdx#size-check-malloc) e a verificação [fasttop](./double-free.mdx#fasttop-double-free-check) na fastbin
+- **glibc 2.26 (2017)**: Introdução da [tcache](./tcache.mdx) (mudança massiva, e sem nenhuma verificação no início). `MALLOC_ALIGNMENT` passa a ser 16 também em 32 bits
+- **glibc 2.28 (2018)**: Verificações no `unsorted bin` (`malloc(): unsorted double linked list corrupted`), que matam o *unsorted bin attack* clássico
+- **glibc 2.29 (2019)**: [Tcache key](./tcache.mdx#tcache-keys-glibc-229) (detecção de double free no tcache) e [Top Chunk Integrity Check](./malloc-maleficarum/house-of-force.mdx#top-chunk-integrity-check)
+- **glibc 2.32 (2020)**: **Safe-linking** (XOR encoding em fd pointers) e verificação de alinhamento nos chunks do tcache/fastbin
+- **glibc 2.34 (2021)**: Remoção dos malloc hooks (`__malloc_hook`, `__free_hook`, `__realloc_hook`), que eram o alvo padrão de escrita arbitrária. A `tcache key` passa a ser aleatória
+- **glibc 2.35+ (2022)**: Começa o endurecimento das estruturas `FILE` (vtables validadas, ponteiros `_wide_data` protegidos), mas os ataques a `stdout`/`FILE` ainda são o caminho mais comum depois dos hooks
 
 ## **Resumo Prático**
 
@@ -77,4 +81,4 @@ strings libc.so.6 | grep "GNU C Library"
 
 **Versões médias (2.26-2.31)**: [Tcache poisoning](./tcache.mdx#tcache-poisoning) lidera, ataques clássicos requerem adaptação
 
-**Versões modernas (≥ 2.32)**: Safe-linking requer leaks de heap, mas exploits ainda são possíveis
+**Versões modernas (≥ 2.32)**: Safe-linking requer leaks de heap, mas exploits ainda são possíveis. Sem os hooks (≥ 2.34), os alvos usuais da escrita arbitrária são: `environ` (vazar a stack) seguido de ROP no return address, a struct `_IO_FILE` do `stdout` (leak e execução via vtable/`_IO_wfile_jumps`), ou a GOT da própria libc

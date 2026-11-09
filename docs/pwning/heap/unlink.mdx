@@ -83,7 +83,14 @@ Para contornar essa proteção, é necessário fazer `P->fd->bk` e `P->bk->fd` a
 3. A verificação passa, mas quando o `unlink` prossegue, escrevemos o valor `A` no endereço apontado por `B`.
 
 
-Isso nos limita bastante, pois o valor escrito é relacionado ao locais conhecidos A e B, e não valores arbitrários. Isso pode ser útil para:
+Isso nos limita bastante, pois o valor escrito é relacionado aos locais conhecidos A e B, e não valores arbitrários. Mas o caso clássico resolve isso: `A = B = &ptr`, onde `ptr` é uma variável global (ou um slot de um array global de notas) que guarda o ponteiro para o chunk `P`. Depois do `unlink`:
 
-- Modificar ponteiros de função (se B for ponteiro de função)
-- Vazar endereços
+```
+ptr = &ptr - 0x18     (em 64 bits)
+```
+
+Ou seja, **`ptr` passa a apontar para 0x18 bytes antes de si mesma**. Se o programa permite escrever no chunk `ptr` ("editar a nota"), agora essa escrita acontece em cima do próprio array de ponteiros. Escrevemos ali o endereço que quisermos (ex: uma entrada da GOT, `__free_hook`, ou `environ`), e a próxima edição/leitura passa a ser uma **escrita/leitura arbitrária**.
+
+Pré-requisitos típicos: um ponteiro global conhecido para o chunk (sem PIE, ou com leak), um Heap Overflow para forjar o chunk falso com `fd`/`bk` dentro de `P` e corromper o `size`/`prev_size` do chunk seguinte (para o `free` dele acreditar que `P` está livre e tentar consolidar), e glibc antiga o bastante para o chunk não cair no tcache (ou tamanhos acima de `0x410`).
+
+Para referência, o [how2heap](https://github.com/shellphish/how2heap) tem a implementação completa (`unsafe_unlink.c`).

@@ -1,6 +1,6 @@
 ---
 title: "Pwning Handbook"
-sidebar_position: 5
+sidebar_position: 99
 unlisted: true
 ---
 
@@ -14,14 +14,14 @@ Este material é um handbook com os "macetes" para fazer pwning de forma prátic
 
 **Funcionamento**
 
-Controla as permissões de escrita em tabelas de dados que contêm ponteiros para funções externas: o GOT (Global Offset Table) e o PLT (Procedure Linkage Table).
+Controla as permissões de escrita em tabelas de dados que contêm ponteiros para funções externas, principalmente a GOT (Global Offset Table). (A PLT é código, e já é somente leitura.)
 
 - **Partial RELRO**: Apenas algumas partes são protegidas; o GOT é escrito após a resolução de funções (LAZY BINDING) e permanece gravável.
 - **Full RELRO**: Todas as relocations são processadas na inicialização (EAGER BINDING). Após a inicialização, todo o GOT se torna somente leitura (read-only).
 
 **Efeito**
 
-Impede ataques que visam modificar ponteiros em áreas de realocação, como GOT (Global Offset Table) e PLT.
+Impede ataques que visam modificar ponteiros em áreas de relocação, como a GOT (Global Offset Table).
 
 **Contorno**
 
@@ -32,7 +32,7 @@ Impede ataques que visam modificar ponteiros em áreas de realocação, como GOT
 
 **Funcionamento**
 
-1. O compilador insere um valor aleatório de 4 ou 8 bytes (o Canary) na Stack, imediatamente antes do endereço de retorno salvo.
+1. O compilador insere um valor aleatório de 4 ou 8 bytes (o Canary) na Stack, entre as variáveis locais e o RBP salvo / endereço de retorno (normalmente `rbp-0x8`). O byte menos significativo é sempre `0x00`.
 2. O valor do Canary é armazenado em uma área de memória segura.
 3. **Antes de a função retornar**, o código gerado pelo compilador verifica se o Canary na Stack corresponde ao valor armazenado.
 4. Se a verificação falhar, o programa aborta o processo.
@@ -43,7 +43,7 @@ Impede sobrescrita do `return address` na stack.
 
 **Contorno**
 
-Vazar o **Canary** (endereço de verificação do Stack Canary), mantendo o valor que ele usa como verificação na stack. Ou sobrescrever ponteiros de função na Heap (Heap Overflow) ou em áreas não protegidas pelo Canary.
+Vazar o **Canary** (o valor aleatório, com format string ou leitura fora do array, por exemplo) e mantê-lo intacto no lugar certo do payload. Ou sobrescrever ponteiros de função na Heap (Heap Overflow) ou em áreas não protegidas pelo Canary.
 
 ## 2.3 NX/DEP
 
@@ -116,7 +116,7 @@ Nota: Em alguns executáveis raros, o `return address` pode ser diferente de `rb
 ## 4.2 Evitando desalinhamento de Stack com ROP de ret
 
 - Ache o endereço de um `ret`.
-  - Com ROPgadget: `ROPgadget`: `ROPgadget -- binary meu_programa | grep "ret"`
+  - Com ROPgadget: `ROPgadget --binary meu_programa | grep ": ret$"`
   - Ou com pwntools:
 
 ```py
@@ -126,8 +126,8 @@ elf = ELF('./vuln')
 rop = ROP(elf)
 
 # Encontra endereço de gadget ret
-ret_gadgets = rop.find_gadget(['ret'])
-print(f"Ret gadget: {hex(ret_gadgets.address)}") # Imprime endereço do gadget
+ret = rop.find_gadget(['ret'])[0]
+print(f"Ret gadget: {hex(ret)}") # Imprime endereço do gadget
 ```
 
 - No buffer overflow, coloque **padding + RET Gadget (endereço) + Função alvo (endereço)**:
@@ -231,4 +231,5 @@ Permite vazar TODA a pilha, pois imprime em sequência tudo que estiver após ES
    2. `%s` - Imprime caracteres em vários blocos de memória até encontrar `\0`. Lê o valor no endereço de memória que foi passado ao %s.
    3. `%n` - Escreve no endereço o número de bytes impressos até agora. (`printf("Hello%n", &count);` => count = 5 no final)
    4. `%p` - Retorna a mesma coisa do `%x`, mas com `0x` na frente
-3. Útil: parâmetro arbitrário -> `printf("%6$x);` imprime o 6º parâmetro (Ex: Sabemos que Canary está lá)
+3. Útil: parâmetro arbitrário -> `printf("%6$p");` imprime o 6º parâmetro (Ex: Sabemos que Canary está lá). Em x64, o 6º parâmetro é o primeiro valor da stack
+4. Escrita com pwntools: `fmtstr_payload(offset, {endereco: valor})`

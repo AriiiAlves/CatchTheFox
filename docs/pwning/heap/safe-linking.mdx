@@ -93,9 +93,9 @@ veja  que recuperamos o fd_real.
 
 ### E os 12 bits perdidos?
 
-O `<< 12` elimina os bits de `&chunk`, não de `fd_real`. Assim, `&chunk >> 12` é usado na ofuscação do `fd`, mas ao fazer `fd_encoded ^ (&chunk << 12)` o `fd` original é recuperado, pela propriedade do XOR.
+O `>> 12` elimina os bits de `&chunk`, não de `fd_real`. Assim, `&chunk >> 12` é usado na ofuscação do `fd`, mas ao fazer `fd_encoded ^ (&chunk >> 12)` o `fd` original é recuperado, pela propriedade do XOR.
 
-Assim, não temos nenhum dado perdido.
+Assim, não temos nenhum dado perdido. Um efeito colateral útil: como a chave `&chunk >> 12` tem 12 bits zerados em cima (ela é um endereço deslocado), **os 12 bits menos significativos de `fd_encoded` são exatamente os 12 bits menos significativos de `fd_real`**. E se `fd_real` for `NULL` (último chunk do bin), `fd_encoded = &chunk >> 12`: ler o `fd` de um chunk livre nessa situação **vaza o endereço da heap** (deslocado), que é justamente a chave que precisamos. Esse é o leak de heap padrão em glibc ≥ 2.32.
 
 ### Por que isso protege?
 
@@ -123,8 +123,8 @@ O Partial Overwrite é uma espécie de ataque cego, mas que funciona se não tem
 Com alignment check, o glibc passa a verificar se o chunk é múltiplo de 16 usando estas macros:
 
 ```c
-#define MALLOC_ALIGNMENT (2 * SIZE_SZ)  // 16 bytes em sistemas 64-bit, 8 bytes em 32 bits
-#define MALLOC_ALIGN_MASK (MALLOC_ALIGNMENT - 1)  // = 15 (0xF) em 64-bit, = 7 (0x7) em 32-bit
+#define MALLOC_ALIGNMENT 16             // 16 bytes (glibc >= 2.26, em 64 e 32 bits)
+#define MALLOC_ALIGN_MASK (MALLOC_ALIGNMENT - 1)  // = 15 (0xF)
 
 #define aligned_OK(m)  (((unsigned long)(m) & MALLOC_ALIGN_MASK) == 0)
 ```
@@ -147,7 +147,7 @@ Isso pois: apenas (1000 (8) & 0111 (7)) == (0000 (8) & 0111 (7)) == 0000.
 
 E no que isso impacta? Bom, em 64-bits, de 256 valores possíveis para 1 byte (0x00 até 0xFF), apenas 16 valores resultam em alinhamento de 16 bytes. Isso reduz drasticamente nossa capacidade de partial overwrite para um endereço arbitrário. Somos obrigados a usar endereços que terminem em `0x0`.
 
-Em 32-bits, somos obrigados a usar endereços que terminem com `0x0` ou `0x8`.
+Em 32-bits, com glibc moderna, também é 16 bytes (`MALLOC_ALIGNMENT` passou a ser 16 em todas as arquiteturas a partir da glibc 2.26). Só em glibc antigas de 32 bits o alinhamento era de 8 bytes, permitindo endereços terminados em `0x0` ou `0x8`.
 
 ### Onde Alignment Check está implementado?
 

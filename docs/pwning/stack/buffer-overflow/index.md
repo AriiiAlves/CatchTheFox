@@ -24,7 +24,7 @@ Simples, não? O programa irá funcionar com o seu input:
 > Você digitou: John
 ```
 
-Vamos dar um `disass main` no pwdgb:
+Vamos dar um `disass main` no pwndbg:
 
 ```
 0x0000555555555149 <+0>:     push   rbp
@@ -125,7 +125,7 @@ hexdump $rsp
 +0030 0x7fffffffdd70  41 41 41 41 41 41 41 41  41 41 41 41 41 41 41 41  │AAAAAAAA│AAAAAAAA│
 ```
 
-Basicamente, acabamos de sobrescrever `0x7fffffffdd80 - 0x7fffffffdd4b = 0x35 = 53 (decimal)` Bytes (`0x7fffffffdd80` é o endereço do último byte com A. `0x7fffffffdd4b` é a quantidade de elementos que não são `41`)! E olha só, digitamos A 53 vezes.
+Basicamente, acabamos de sobrescrever `0x7fffffffdd80 - 0x7fffffffdd4b = 0x35 = 53 (decimal)` bytes (`0x7fffffffdd4b` é o endereço do primeiro `41`, ou seja, o início da nossa variável, e `0x7fffffffdd80` é o primeiro endereço depois do último `41`, onde ficou o `\0`)! E olha só, digitamos A 53 vezes.
 
 Okay, isso significa que podemos **alterar o que quisermos na stack, desde a variável que permite o buffer overflow até depois do `rbp`**.
 
@@ -151,6 +151,8 @@ Continuing.
 Program received signal SIGSEGV, Segmentation fault.
 ```
 
-**Segmentation fault**! Por que? Pois o endereço de memória `0x4141414141414141`, não deveria estar sendo acessado pelo programa, ou seja, é uma área de memória reservada de outro programa ou do sistema operacional.
+**Segmentation fault**! Por quê? Pois o endereço `0x4141414141414141` não está mapeado na memória do processo (não pertence a nenhuma região válida: código, stack, heap ou bibliotecas). Em x86-64, ele nem sequer é um endereço "canônico" (os endereços de usuário válidos vão só até `0x00007fffffffffff`), então o processador recusa o acesso e o kernel mata o programa com `SIGSEGV`.
 
-O ponto principal do Buffer Overflow é que, **para um dado input, precisamos que o código leia mais caracteres do que a variável pode aguentar**. Se no código há um limite de caracteres, isso faz com que Buffer Overflow **não seja uma técnica possível**, e precisamos explorar outras possibiilidades.
+O ponto principal do Buffer Overflow é que, **para um dado input, precisamos que o código leia mais caracteres do que a variável pode aguentar**. Se no código há um limite de caracteres respeitado corretamente (como `fgets(buf, sizeof(buf), stdin)` ou `read(0, buf, sizeof(buf))`), isso faz com que Buffer Overflow **não seja uma técnica possível**, e precisamos explorar outras possibilidades.
+
+Funções que costumam permitir Buffer Overflow: `gets` (sem limite nenhum), `scanf("%s")` (sem limite), `strcpy`/`strcat` (copiam até o `\0`), `sprintf`, e `read`/`fgets`/`memcpy` quando o tamanho passado é maior do que o buffer.

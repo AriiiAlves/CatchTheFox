@@ -20,10 +20,14 @@ sidebar_position: 1
     - `add` - **Adiciona dois valores** e armazena no primeiro operando.
     - `sub` - **Subtrai o segundo operando do primeiro** e armazena no primeiro.
     - `xor` - **Faz o xor nos dois argumentos**, e armazena no primeiro operando. and e or são semelhantes.
-    - `push` - **Cresce a stack em 8 ou 4 bytes** (para x64, ou 4 para x86), **depois** **adiciona o conteúdo do registrador para o topo da stack.**
-    - `pop` - Tira 8 bytes do topo da stack e armazena no argumento. Depois encolhe a stack.
+    - `push` - **Cresce a stack em 8 bytes** (x64) ou 4 (x86), **depois** **adiciona o conteúdo do registrador para o topo da stack.** (`sub rsp, 8; mov [rsp], rax`)
+    - `pop` - Tira 8 bytes do topo da stack e armazena no argumento. Depois encolhe a stack. (`mov rax, [rsp]; add rsp, 8`)
     - `jmp` - **Pula para um endereço de instrução**. Redireciona a execução do código.
     - `call` - Redução dos comandos `push RIP` e `jmp function`. Utilizado sempre que se chama uma função.
-    - `ret` - Redução do comando `pop RIP` (desempilha topo da stack para voltar para a execução de código antes da chamada de função, e atribui o valor do pop ao RIP).
+    - `leave` - Redução de `mov rsp, rbp; pop rbp` (desfaz o stack frame). Vem antes do `ret`.
+    - `ret` - Redução do comando `pop RIP` (desempilha topo da stack para voltar para a execução de código antes da chamada de função, e atribui o valor do pop ao RIP). **É o que o Buffer Overflow sequestra.**
     - `cmp` - **Compara dois operandos, faz o primeiro menos o segundo e checa se o resultado é maior/menor/igual a zero**. Dependendo do valor, **define uma flag** de acordo.
-    - `jnz/jz` -  (jump if not zero/jump if zero) Similar ao jmp. Mas apenas **executa dependendo do status da zero flag**. Existem outros jumps.
+    - `test` - **AND entre os operandos**, só define flags. `test eax, eax` + `je` = "se eax == 0".
+    - `jnz/jz` -  (jump if not zero/jump if zero) Similar ao jmp. Mas apenas **executa dependendo do status da zero flag**. Outros: `je/jne` (igual/diferente), `jg/jl/jge/jle` (comparação **com sinal**), `ja/jb/jae/jbe` (comparação **sem sinal**: o tipo do jump revela se a variável era `int` ou `unsigned`).
+- **Convenção de chamada (Linux x64)** - Argumentos em `rdi, rsi, rdx, rcx, r8, r9` (7º em diante na stack), retorno em `rax`. **Syscalls**: número em `rax`, argumentos em `rdi, rsi, rdx, r10, r8, r9`, instrução `syscall`. Em x86 (32 bits): argumentos de função na stack (`[ebp+8]`, `[ebp+12]`...), syscalls com número em `eax`, argumentos em `ebx, ecx, edx` e `int 0x80`.
+- **Stack frame** - Prólogo `push rbp; mov rbp, rsp; sub rsp, N`. Variáveis locais em `[rbp-X]`, RBP salvo em `[rbp]`, **return address em `[rbp+8]`** (`[ebp+4]` em 32 bits).

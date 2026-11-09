@@ -9,16 +9,16 @@ Imagine que temos uma função `funcao(arg1, arg2, arg3,...)`. Como a função o
 
 ## Troca de stack frame
 
-Lmbre-se que no início de toda função temos a criação de um novo stack frame para a função com `push rbp` (salva rbp/stack frame antigo) e `mov RBP, RSP` (novo stack frame). Antes do `push rbp`, a instrução `call` faz o `push rip` (salva return address) e `jmp`.
+Lembre-se que no início de toda função temos a criação de um novo stack frame para a função com `push rbp` (salva rbp/stack frame antigo) e `mov RBP, RSP` (novo stack frame). Antes do `push rbp`, a instrução `call` faz o `push rip` (salva return address) e `jmp`.
 
 Assim, **antes de começar a puxar os parâmetros na função, temos a troca de stack frame**. 
 
 ## Convenção de chamada para 32-bit e 64-bit
 
 ### x86 (32-bit)
-- Argumentos são todos passados na **stack** (`push arg1; push arg2; ...`)
+- Argumentos são todos passados na **stack**, empilhados da direita para a esquerda (`push arg3; push arg2; push arg1`), de modo que `arg1` fica no topo
 - Chama-se função (`call funcao` = `push rip; jmp funcao`)
-- Função cria novo stack frame (`push rbp; mov rbp, rsp`)
+- Função cria novo stack frame (`push ebp; mov ebp, esp`)
 - `funcao` vai buscar o valor para o primeiro parâmetro após o `return address` (depois de criar novo frame). Isso seria aproximadamente `esp+4` (para o stack frame antigo, considerando o endereço de retorno na stack)
 
 Antes entrar em `funcao`, mas após `call`:
@@ -33,16 +33,16 @@ Quando entramos em `funcao`:
 - `funcao` espera encontrar o valor para `arg1` em `ebp+8`, e os outros em seguida
 
 ```
-EBP+0   → RBP antigo
+EBP+0   → EBP antigo
 EBP+4   → endereço de retorno
-ESP+8   → primeiro argumento
-ESP+12  → segundo argumento, etc.
+EBP+8   → primeiro argumento
+EBP+12  → segundo argumento, etc.
 ```
 
 ### x86-64 (64-bit)
 
 - Os primeiros argumentos são passados em registradores
-- Argumentos excedentes são passados na **stack** (`push arg7; push arg8; ...`)
+- Argumentos excedentes (a partir do 7º) são passados na **stack**, também da direita para a esquerda (`push arg8; push arg7`)
 - Chama-se função (`call funcao` = `push rip; jmp funcao`)
 - Função cria novo stack frame (`push rbp; mov rbp, rsp`)
 - `funcao` vai primeiro olhar nos registradores que armazenam parâmetros (`RDI`, `RSI`, `RDX`, `RCX`, `R8`, `R9`)
@@ -50,14 +50,18 @@ ESP+12  → segundo argumento, etc.
 
 Lembrando a ordem de passagem de argumentos para registradores:
 
-1. `RDI` (Endereço da Format String)
-2. `RSI`  (Parâmetro 1)
-3. `RDX` (Parâmetro 2)
-4. `RCX` (...)
-5. `R8`
-6. `R9`
-7. Stack (RSP+8, RSP+16, ...)
+1. `RDI` (1º argumento)
+2. `RSI` (2º argumento)
+3. `RDX` (3º argumento)
+4. `RCX` (4º argumento)
+5. `R8` (5º argumento)
+6. `R9` (6º argumento)
+7. Stack (no início da função, `RSP+8` é o 7º argumento, `RSP+16` o 8º, ...)
+
+O valor de retorno da função vai em `RAX` (`EAX` em 32 bits).
+
+Os registradores `RBX`, `RBP` e `R12`-`R15` são **preservados** (a função chamada precisa devolvê-los com o valor original). Todos os outros podem ser alterados livremente pela função chamada. Isso importa em ROP: uma função da libc pode destruir o valor que você colocou em `RDX`, por exemplo.
 
 ## Alinhamento de stack
 
-A stack deve estar alinhada em 16 bytes no momento da chamada call (`rsp % 16 == 0`). Para funções nativas do código isso não é problema, mas para ataques precisamos ter isso em mente.
+A stack deve estar alinhada em 16 bytes no momento da instrução `call` (`rsp % 16 == 0`). Como o `call` empilha o endereço de retorno (8 bytes), no início de toda função vale `rsp % 16 == 8`. Para funções nativas do código isso não é problema, mas em ataques que desviam o fluxo com `ret` (em vez de `call`) essa regra é quebrada, e funções como `system()` podem crashar em instruções SSE (`movaps`). Veja [Buffer Overflow - Return Address](../pwning/stack/buffer-overflow/return-address.md#cuidado-ao-sobrescrever-return-address-desalinhamento-de-stack).
