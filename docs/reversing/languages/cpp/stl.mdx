@@ -1,0 +1,119 @@
+---
+title: "STL na memória"
+sidebar_position: 3
+---
+
+A STL (Standard Template Library) é onde mora quase todo input de um programa C++: `std::string` para texto, `std::vector` para arrays, `std::map` para tabelas. Como são templates, cada uso vira código compilado dentro do binário (sem símbolos externos para o `ltrace` pegar, quando inlinado), e o decompilador mostra uma sopa de `basic_string<char, char_traits<char>, allocator<char>>`. Saber o layout de cada um permite ler os dados direto da memória e ignorar o código.
+
+Tudo abaixo é para a **libstdc++** (GCC/Clang no Linux) em x86-64, ABI `__cxx11` (padrão desde o GCC 5). A libc++ (clang no macOS) e o MSVC têm layouts diferentes, mas as mesmas ideias.
+
+## std::string
+
+```c
+struct string {              // 32 bytes
+    char   *ptr;             // +0  dados (terminados em \0)
+    size_t  size;            // +8  tamanho
+    union {
+        char   local[16];    // +16 buffer interno (SSO)
+        size_t capacity;     // +16 capacidade, quando os dados estão na heap
+    };
+};
+```
+
+<Side>
+  <Mem
+    title='std::string s = "flag{abc}" (SSO: cabe em 15 bytes)'
+    cellW={240}
+    rows={[
+      {addr: '+0', label: 'ptr = &s + 16', kind: 'ptr'},
+      {addr: '+8', label: 'size = 9', kind: 'meta'},
+      {addr: '+16', label: '"flag{abc}\\0......"', kind: 'data', h: 1.4},
+    ]}
+  />
+  <Mem
+    title="std::string com 40 caracteres (heap)"
+    cellW={240}
+    rows={[
+      {addr: '+0', label: 'ptr → chunk na heap', kind: 'ptr'},
+      {addr: '+8', label: 'size = 40', kind: 'meta'},
+      {addr: '+16', label: 'capacity = 40', kind: 'meta'},
+      {addr: '+24', label: '(lixo)', kind: 'free'},
+    ]}
+  />
+</Side>
+
+- **SSO** (*small string optimization*): strings de até 15 caracteres ficam dentro do próprio objeto. O teste é `ptr == this + 16`.
+- Para ler no GDB: `x/s *(char **)addr` (sempre funciona, SSO ou não) e `p *(size_t *)(addr + 8)`.
+- `s.c_str()` é só `[s+0]`. `s.size()` é `[s+8]`. Um `cmp QWORD PTR [rax+8], 0x20` logo após ler o input é "a flag tem 32 caracteres".
+- Comparação: `s == "..."` vira `std::string::compare(const char*)` ou `operator==` (que compara `size` e depois `memcmp`). `b *std::string::compare` no GDB, ou `ltrace -C`, mostra os dois lados.
+- Em pwn: uma `std::string` liberada e realocada é o jeito padrão de ocupar o lugar de um objeto em UAF (32 bytes de objeto = `std::string` de 16 a 31 chars na heap... ou qualquer objeto pequeno substituído pelo buffer de uma string grande).
+
+## std::vector
+
+```c
+struct vector {              // 24 bytes
+    T *begin;                // +0
+    T *end;                  // +8   begin + size * sizeof(T)
+    T *end_of_storage;       // +16  begin + capacity * sizeof(T)
+};
+```
+
+- `size()` é `(end - begin) / sizeof(T)`. O decompilador mostra `(long)(end - begin) >> 2` para `vector<int>` ou `>> 3` para ponteiros/`long`: o shift revela `sizeof(T)`.
+- `v[i]` é `begin + i*sizeof(T)`, **sem verificação**. `v.at(i)` chama `__throw_out_of_range_fmt`.
+- `push_back` quando `end == end_of_storage` realoca (dobra a capacidade), copia e libera o buffer antigo: o endereço dos elementos muda, e ponteiros antigos viram UAF.
+- GDB: `x/10gx *(long *)addr` mostra os elementos. `vector<string>` é um array de structs de 32 bytes.
+
+## std::map e std::set
+
+Árvore rubro-negra. O objeto tem 48 bytes:
+
+```c
+struct map {
+    void  *compare;          // +0  (vazio para std::less; ocupa 8 por alinhamento)
+    struct {                 // header: um nó falso
+        int   color;         // +8
+        node *parent;        // +16  raiz da árvore
+        node *left;          // +24  menor elemento
+        node *right;         // +32  maior elemento
+    } header;
+    size_t count;            // +40
+};
+struct node {
+    int   color;             // +0
+    node *parent, *left, *right;   // +8, +16, +24
+    Key   key;               // +32
+    Value value;             // +32 + sizeof(Key), alinhado
+};
+```
+
+- Percorrer em ordem: comece em `header.left` e siga `right`, depois suba. Na prática, é mais fácil dar `b` no código que insere (`_Rb_tree_insert_and_rebalance`) e ver cada chave/valor passar.
+- `std::unordered_map` é uma tabela hash: array de buckets + lista encadeada única de nós `{next, key, value, hash}`. Com símbolos de debug, `p mapa` no GDB imprime tudo graças aos *pretty printers* da libstdc++.
+
+## Outros
+
+| Tipo | Tamanho | Layout |
+|---|---|---|
+| `std::array<T, N>` | `N * sizeof(T)` | Igual a um array C, sem header |
+| `std::unique_ptr<T>` | 8 | O ponteiro. `delete` no destrutor |
+| `std::shared_ptr<T>` | 16 | `ptr` (+0), ponteiro para o *control block* (+8), que tem vtable, `use_count`, `weak_count` |
+| `std::pair<A, B>` | | `A` seguido de `B`, alinhado |
+| `std::optional<T>` | `sizeof(T) + 1`, alinhado | `T` seguido de um `bool` |
+| `std::function` | 32 | Buffer para o functor (+0, 16 bytes) ou ponteiro para ele, `manager` (+16), `invoker` (+24, o que é chamado: outro ponteiro de função dentro do objeto, e portanto outro alvo em pwn) |
+| `std::list` | 24 | Nó sentinela `{next, prev}` + `size`; nós `{next, prev, valor}` |
+| `std::deque` | 80 | Mapa de blocos; raramente vale a pena ler na mão |
+
+## iostream
+
+`std::cin >> x` e `std::cout << x` são chamadas a `operator>>`/`operator<<` com o stream como primeiro argumento, encadeadas:
+
+```cpp
+std::cout << "a" << x << std::endl;
+// operator<<(operator<<(operator<<(cout, "a"), x), endl)
+```
+
+Leia de dentro para fora. `std::cin >> string` lê até espaço (sem limite de tamanho, não é overflow: a string cresce). `std::cin >> char[32]` **é** overflow (até o C++20). `std::getline(cin, s)` lê a linha toda. `cin.read(buf, n)` é o `read` do C.
+
+## Referências
+
+- [libstdc++ - basic_string.h](https://gcc.gnu.org/onlinedocs/libstdc++/libstdc++-html-USERS-4.4/a00730.html) - Implementação da `std::string` (a nova ABI está em `bits/basic_string.h` no código do GCC).
+- [GDB pretty printers da libstdc++](https://sourceware.org/gdb/wiki/STLSupport) - Como habilitar `p vetor` legível no GDB.

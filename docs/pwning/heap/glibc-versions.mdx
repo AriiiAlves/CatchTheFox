@@ -52,6 +52,9 @@ O [pwninit](https://github.com/io12/pwninit) também baixa os símbolos de debug
 | Double free direto no tcache | não existe | ✅ | 🟡 bypass da key | 🟡 | 🟡 |
 | [Unsafe unlink](./unlink.mdx) | ✅ | ✅ (fora do tcache) | ✅ | ✅ | ✅ |
 | [House of Force](./malloc-maleficarum/house-of-force.mdx) | ✅ | ✅ | ❌ | ❌ | ❌ |
+| [House of Spirit](./malloc-maleficarum/house-of-spirit.mdx) | ✅ | ✅ (mais fácil: tcache) | ✅ | ✅ | ✅ |
+| [House of Lore](./malloc-maleficarum/house-of-lore.mdx) | ✅ | ✅ (encher/esvaziar o tcache) | ✅ | ✅ | ✅ |
+| [House of Mind](./malloc-maleficarum/house-of-mind.mdx) (variante fastbin) | ✅ | ✅ (tcache cheio) | ✅ | ✅ | ✅ |
 | Unsorted bin attack | ✅ | ✅ | ❌ | ❌ | ❌ |
 | Largebin attack | ✅ | ✅ | ✅ (variante mais restrita a partir da 2.30) | ✅ | ✅ |
 | Escrita em `__free_hook` / `__malloc_hook` | ✅ | ✅ | ✅ | ✅ | ❌ |

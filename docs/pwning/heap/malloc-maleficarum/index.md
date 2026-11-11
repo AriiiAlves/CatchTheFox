@@ -8,11 +8,27 @@ Por volta de 2005, a glibc foi aprimorada e tornou alguns ataques obsoletos. Nes
 
 The Malloc Maleficarum possui uma coleção de técnicas nomeadas com _House_:
 
-- The House of Prime
-- The House of Mind
-- The House of Force
-- The House of Lore
-- The House of Spirit
-- The House of Chaos
+| Técnica | Ideia | Hoje |
+|---|---|---|
+| [The House of Prime](./house-of-prime.mdx) | Dois `free` com `size` controlado trocam a arena por uma falsa | Morta (glibc 2.3.x) |
+| [The House of Mind](./house-of-mind.mdx) | Bit `A` ligado faz o `free` usar uma arena forjada | Variante fastbin ainda funciona |
+| [The House of Force](./house-of-force.mdx) | `size` do top chunk gigante → `malloc` em qualquer endereço | Morta na 2.29 |
+| [The House of Lore](./house-of-lore.mdx) | `bk` corrompido na small bin → `malloc` devolve chunk falso | Funciona (com ajustes para o tcache) |
+| [The House of Spirit](./house-of-spirit.mdx) | `free` em um chunk falso → `malloc` devolve o chunk falso | Funciona em todas as versões |
+| The House of Chaos | Não é uma técnica: é a conclusão do paper, sobre o que ainda estava por vir | |
 
-Para manter a tradição, os heap exploits modernos possuem o nome _House_ na frente.
+Para manter a tradição, os heap exploits modernos possuem o nome _House_ na frente. Alguns dos mais citados:
+
+| House | Ano | Ideia |
+|---|---|---|
+| House of Einherjar | 2016 | Off-by-null no `size` + `prev_size` falso → consolidação para trás e chunks sobrepostos |
+| House of Orange | 2016 | Sem `free`: encolher o top chunk para ele ir à unsorted bin; depois FSOP via `_IO_list_all` |
+| House of Roman | 2018 | Fastbin dup + partial overwrite, sem leak (brute force de 12 bits) |
+| House of Botcake | 2019 | Double free entre tcache e unsorted bin, contornando a tcache key |
+| House of Husk | 2020 | Tabelas de especificadores customizados do `printf` como alvo |
+| House of Kiwi / Emma / Apple | 2021 a 2022 | FSOP moderno: `__malloc_assert`, `_IO_cookie_jumps`, `_IO_wfile_jumps` |
+| House of Banana | 2022 | `link_map` falso em `_rtld_global` → `_dl_fini` chama o que você quiser |
+| House of Tangerine | 2023 | House of Orange adaptado ao tcache |
+| House of Water | 2024 | Controle do tcache sem leak |
+
+A [Checklist de Pwning](../../checklist.mdx#houses) acompanha quais delas já têm página aqui.

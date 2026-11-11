@@ -1,0 +1,59 @@
+---
+title: The House of Prime
+sidebar_position: 1
+---
+
+House of Prime é a primeira técnica do Malloc Maleficarum e a mais ambiciosa: com **dois `free` em chunks de `size` controlado** e um `malloc`, ela faz o alocador trocar a arena inteira por uma **arena falsa** dentro de um chunk seu. A partir daí, o `malloc` devolve o que você quiser. Funciona só em glibc **2.3.x** (até a 2.3.5, de 2005); está aqui pelo valor histórico e porque as ideias dela (índice negativo em fastbin, arena falsa) voltam em outras técnicas.
+
+## A ideia
+
+Na glibc 2.3.x, a `malloc_state` começava assim:
+
+```c
+struct malloc_state {
+  mutex_t mutex;
+  INTERNAL_SIZE_T max_fast;        // limite do que é "fast" (hoje é a global global_max_fast)
+  mfastbinptr fastbins[NFASTBINS]; // fastbins[0] = 0x10 (32 bits), fastbins[1] = 0x18, ...
+  mchunkptr top;
+  ...
+};
+```
+
+E o caminho rápido do `free` era:
+
+```c
+if ((unsigned long)(size) <= (unsigned long)(av->max_fast)) {
+    if (chunk_at_offset(p, size)->size <= 2 * SIZE_SZ
+        || chunksize(chunk_at_offset(p, size)) >= av->system_mem)
+        malloc_printerr("free(): invalid next size (fast)");
+    fb = &(av->fastbins[fastbin_index(size)]);   // fastbin_index(sz) = (sz >> 3) - 2  (32 bits)
+    p->fd = *fb;
+    *fb = p;                                     // escreve o endereço do chunk em *fb
+}
+```
+
+Não havia verificação de tamanho mínimo. Com `size = 8`, `fastbin_index(8) = -1`, e `fb` aponta para o campo **anterior** ao array: `max_fast`. O `free` escreve o endereço do chunk em `max_fast`, que vira um número enorme (um endereço da heap). A partir daí, **qualquer tamanho é tratado como fastbin**.
+
+## O ataque
+
+1. **Primeiro `free`**: um overflow coloca `size = 8` em um chunk `A`. `free(A)` faz `av->max_fast = A`. Para passar na checagem do "próximo chunk" (que fica em `A + 8`, ou seja, nos próprios dados de `A`), escreva ali um `size` entre `8` e `system_mem`.
+2. **Segundo `free`**: um chunk `B` com `size` grande e escolhido. Como agora tudo é "fast", `fb = &av->fastbins[(size >> 3) - 2]` pode apontar para **qualquer endereço depois da arena**, e `*fb = B`. O alvo do paper é a `arena_key`, a variável que diz qual arena a thread usa: depois do `free`, `arena_key = B`.
+3. **`malloc`**: o alocador pega a arena da `arena_key` e passa a usar o chunk `B` como `malloc_state`. Você controla `max_fast`, as `fastbins`, os `bins`, o `top`: o paper monta uma unsorted bin falsa com um chunk do tamanho pedido apontando para onde quiser, e o `malloc` devolve esse endereço (por exemplo, a stack, para sobrescrever um endereço de retorno).
+
+Há detalhes chatos em cada passo (o `size` de `B` precisa ter os bits de flag certos, a arena falsa precisa de campos coerentes para o `malloc` não cair em caminhos que abortam), e o [Malloc Des-Maleficarum](https://phrack.org/issues/66/10) tem o código completo.
+
+## Mitigações
+
+Nenhum dos três passos sobrevive em uma glibc atual:
+
+- O `free` verifica `size < MINSIZE` (`free(): invalid size`) e o alinhamento do ponteiro e do tamanho desde a 2.4/2.5, o que mata o índice `-1`.
+- `max_fast` saiu da arena e virou a global `global_max_fast` (glibc 2.6), que não está "antes" de nenhum array.
+- A `arena_key` virou uma variável de TLS (`thread_arena`), fora do alcance de um índice de fastbin, e `fastbin_index` passou a ser conferido no `malloc` (`malloc(): memory corruption (fast)`).
+
+O que sobrou da House of Prime é o padrão **"faça o alocador usar uma arena que eu controlo"**, que é exatamente a [House of Mind](./house-of-mind.mdx).
+
+## Resumo
+
+1. `free` de chunk com `size = 8` → `max_fast` vira enorme
+2. `free` de chunk com `size` escolhido → escreve o endereço dele na `arena_key`
+3. `malloc` usa a arena falsa → devolve endereço arbitrário

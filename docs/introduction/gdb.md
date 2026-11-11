@@ -34,6 +34,8 @@ Para navegar na execução do programa no GDB:
 - `step` - Linha por linha, mas entra em chamadas de função
 - `nexti` - Instrução por instrução, pulando chamadas de função
 - `stepi` - Instrução por instrução, entrando em chamadas de função
+- `finish` - Executa até a função atual retornar (e mostra o valor de retorno). Útil quando você entrou em uma função sem querer com `step`/`stepi`
+- `until` (`u`) - Como `next`, mas não volta para trás em loops: avança até uma instrução depois da atual
 
 (`next` e `step` andam por linhas do código-fonte, então só funcionam direito em binários com debugging symbols. Em binários de CTF, normalmente usamos `nexti`/`ni` e `stepi`/`si`.)
 
@@ -70,9 +72,11 @@ Agora, suponha que queremos dar um break na call do puts (função que imprime t
 
 - `b *main+25` (+25 é relativo ao início da função main) ou `b *0x08048414` (endereço de memória da instrução)
 
+Esse binário não tem PIE, então os endereços são fixos. Em um binário **com PIE**, antes do `run` o GDB mostra os endereços como offsets (`0x1139`, `0x11a4`...), e só depois que o programa começa é que eles ganham a base (`0x5555555551a4`). Para colocar um breakpoint por endereço nesses binários, inicie o programa primeiro (`start`, que já para na `main`, ou `starti`, que para na primeira instrução), e use o endereço completo. Breakpoints por nome (`b main`) ou relativos (`b *main+25`) funcionam dos dois jeitos. No pwndbg, `b *$rebase(0x11a4)` soma a base para você.
+
 **Ainda não rodamos o binário**, apenas estabelecemos onde o GDB deve parar para que possamos analisar o código. Quando rodarmos o binário, o processo vai pausar e mostrar o debugger exatamente na instrução assembly onde colocamos os breakpoints (com `b *main`, paramos exatamente na primeira instrução da função. Já com `b main`, sem o `*`, o GDB costuma parar um pouco depois, logo após o prólogo da função).
 
-Para **executar o código desde o começo**, execute `run` (ou `r`). Isso vai parar no primeiro breakpoint. Para **prosseguir**, execute `continue` (ou `c`). Esse comando continua a execução até encontrar um breakpoint, fim do programa ou sinal (como segfault).
+Para **executar o código desde o começo**, execute `run` (ou `r`). Isso vai parar no primeiro breakpoint. Argumentos e entrada vão na mesma linha, como no shell: `run arg1 arg2`, `run < input.txt`, ou `run < <(python3 -c 'import sys; sys.stdout.buffer.write(b"A"*100)')` para bytes arbitrários. Para debugar um processo que já está rodando: `attach <pid>` (ou `gdb -p <pid>`). O pwntools automatiza isso com `gdb.debug()` e `gdb.attach()` (veja [Pwntools](./pwntools.md)). Para **prosseguir**, execute `continue` (ou `c`). Esse comando continua a execução até encontrar um breakpoint, fim do programa ou sinal (como segfault).
 
 Para mostrar os breakpoints que colocamos:
 
@@ -178,16 +182,16 @@ No exemplo acima, temos, por exemplo:
     - `0xffffd0d0` contém o endereço `0x080484b0`
     - `0x080484b0` aponta para a string "Hello World!"
 - **$ebp (base pointer): 0xffffd0e8  →  0x00000000**
-    - `ebp` contém o endereço 0xffffd0e8 (base da stack atual)
+    - `ebp` contém o endereço 0xffffd0e8 (base do stack frame atual, o pedaço da stack que pertence à função em execução)
     - `0xffffd0e8` contém o valor 0x0 (zero)
 
 Além disso, temos o **registrador com as flags**:
 
 - **$eflags: [zero carry PARITY ADJUST SIGN trap INTERRUPT direction overflow resume virtualx86 identification]**
 
-Se a flag é mostrada, seu valor é 1. Se não for mostrada, seu valor é 0. Como, por exemplo: 
+O GEF mostra **todas** as flags: as que estão ligadas (valor 1) aparecem em **MAIÚSCULAS** e as desligadas (valor 0) em minúsculas. No exemplo, `PARITY`, `ADJUST`, `SIGN` e `INTERRUPT` estão ligadas, e `zero` e `carry` estão desligadas (a última operação não resultou em zero). O pwndbg faz o mesmo, mas destaca as ligadas em verde. No `gdb` puro, `info registers eflags` lista só as ligadas: `[ PF AF SF IF ]`.
 
-- `zero` aparece - Última operação resultou em zero
+As que mais importam para nós são `ZF` (zero), `CF` (carry), `SF` (sign) e `OF` (overflow): são elas que os saltos condicionais (`je`, `jne`, `jb`, `jl`...) consultam. Mudar uma flag muda o caminho do programa: `set $eflags = $eflags | 0x40` liga a `ZF` (no GEF, `edit-flags +zero`; no pwndbg, `setflag ZF 1`).
 
 #### Stack
 
@@ -299,8 +303,14 @@ $esp   : 0xffffd0d0  →  0x080484b0  →  "hello world!"
 
 Para examinar as coisas com `x` , você tem que especificar o que vai ser examinado, e ele mostra o conteúdo:
 
-- `x/a` - Endereço, `x/10c` - Número de caracteres, `x/s` - String, `x/g` - Qword, `x/w` - Dword, `x/x` - Hexadecimal, `x/10i` - 10 instruções
-- Os formatos podem ser combinados: `x/20gx $rsp` mostra 20 qwords em hexadecimal a partir do topo da stack.
+O formato é `x/<quantidade><formato><tamanho> <endereço>`, e cada parte é opcional:
+
+- **Formato**: `x` hexadecimal, `d` decimal, `a` endereço (com o símbolo mais próximo), `s` string, `i` instrução, `c` caractere
+- **Tamanho**: `b` byte, `h` 2 bytes (halfword), `w` 4 bytes (word), `g` 8 bytes (giant)
+- Exemplos: `x/s 0x80484b0` (string), `x/10i $eip` (10 instruções a partir da atual), `x/20gx $rsp` (20 qwords em hexadecimal a partir do topo da stack), `x/8xb $esp` (8 bytes um a um), `x/4wx &variavel`
+- O endereço aceita expressões: `x/gx $rbp-0x8`, `x/s *(char **)($rsp+8)`
+
+O GDB lembra o último formato: um `x` sem argumentos continua de onde parou. Para ver valores (e não memória), use `print` (`p`): `p $rax`, `p/x $rax` (hex), `p/d`, `p/t` (binário), `p &variavel`, `p $rsp - $rbp`.
 
 Para visualizar o conteúdo dos registradores:
 
@@ -309,6 +319,19 @@ Para visualizar o conteúdo dos registradores:
 Para ver o stack frame (seção da stack alocada para uma única função)
 
 - `info frame`
+
+Para ver o mapa de memória do processo (onde estão o binário, a libc, a heap e a stack, com as permissões de cada região):
+
+- `info proc mappings` (ou `vmmap` no GEF/pwndbg)
+
+### Watchpoints
+
+Um watchpoint é um breakpoint em **dados**: o GDB para quando um endereço é escrito (`watch`), lido (`rwatch`) ou os dois (`awatch`). É o jeito mais rápido de descobrir *quem* altera uma variável ou um ponteiro:
+
+- `watch *(long *)0x0804a010` ou `watch variavel` (com símbolos)
+- `rwatch *(int *)$ebp-0xc`
+
+Quando o watchpoint dispara, o GDB mostra o valor antigo e o novo, e `bt` mostra a função responsável.
 
 ### Mudando valores
 
@@ -321,6 +344,15 @@ Para mudar o valor de um registrador:
 - `set $eax = 0x10`
 
 Assim, podemos manipular a memória e os registradores do jeito que quisermos.
+
+## ASLR dentro do GDB
+
+Por padrão, o GDB **desliga o ASLR** do processo que ele roda (`set disable-randomization on`): a stack, a heap e a libc caem sempre nos mesmos endereços, o que facilita o debug. Isso tem duas consequências:
+
+- Um endereço de stack ou de libc que você anotou dentro do GDB **não vale** fora dele. Para debugar nas condições reais, use `set disable-randomization off` antes do `run`.
+- Mesmo com o ASLR desligado, os endereços da stack mudam entre rodar no GDB e rodar no terminal, porque o GDB muda as variáveis de ambiente (`LINES`, `COLUMNS`, caminho do programa) e elas ficam na stack. Exploits que dependem de endereços absolutos da stack costumam falhar por isso; prefira vazar um endereço em tempo de execução.
+
+O binário em si (quando tem PIE) também é carregado em uma base fixa no GDB, normalmente `0x555555554000` em x86-64.
 
 ## Arquivos compilados e Debugging symbols
 
@@ -425,7 +457,9 @@ Para navegar com o GDB em arquivos assim, você terá que usar o entry point:
 (gdb) si/ni para navegar
 ```
 
-Entry point é o endereço de memória onde o sistema começa a executar um programa. É a primeira instrução do código que será executada (geralmente a função `_start`, e não a `main`). Você pode encontrá-lo com `readelf -h ./binario` (campo *Entry point address*) ou, dentro do GDB, com `info file`.
+Entry point é o endereço de memória onde o sistema começa a executar um programa. É a primeira instrução do código que será executada (geralmente a função `_start`, e não a `main`). Você pode encontrá-lo com `readelf -h ./binario` (campo *Entry point address*) ou, dentro do GDB, com `info file`. Atalhos: `starti` para na primeira instrução sem precisar do endereço, e o GEF/pwndbg têm o comando `entry` (`entry-break` no GEF) com o mesmo efeito.
+
+A partir do entry point, dá para **achar a `main` mesmo sem símbolos**: a `_start` passa o endereço da `main` como primeiro argumento para `__libc_start_main`. Em x86-64, é o valor carregado em `rdi` logo antes do `call __libc_start_main` (`lea rdi, [rip+0x...]` ou `mov rdi, 0x401136`); em x86, é o último `push` antes do `call`. Também dá para chegar lá pelo outro lado: `b *puts` (a `.dynsym` continua lá), `run`, e `bt`/`finish` para voltar à função que chamou o `puts`, que é a `main` ou uma função dela.
 
 ### Verificando nível de strip de um binário
 

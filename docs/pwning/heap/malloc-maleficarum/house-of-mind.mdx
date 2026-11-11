@@ -1,0 +1,84 @@
+---
+title: The House of Mind
+sidebar_position: 2
+---
+
+House of Mind faz o `free` acreditar que um chunk pertence a **outra arena**, que você mesmo forjou. Como as listas dessa arena são suas, o `free` escreve o endereço do chunk onde você mandar. É uma **escrita arbitrária de um ponteiro da heap** com um único `free`, sem precisar de UAF ou double free. A versão original (pela unsorted bin) morreu na glibc 2.11, mas a **variante pela fastbin continua funcionando em glibc modernas**, inclusive com tcache (o how2heap mantém um exemplo dela).
+
+## Arenas e o bit `A`
+
+Cada chunk tem a flag `A` (`NON_MAIN_ARENA`, bit `0x4` do `size`). Quando ela está ligada, o `free` não usa a `main_arena`: ele descobre a arena a partir do **endereço do chunk**.
+
+```c
+#define heap_for_ptr(ptr)   ((heap_info *) ((unsigned long) (ptr) & ~(HEAP_MAX_SIZE - 1)))
+#define arena_for_chunk(p)  (chunk_main_arena(p) ? &main_arena : heap_for_ptr(p)->ar_ptr)
+```
+
+Heaps de threads secundárias são mapeadas alinhadas em `HEAP_MAX_SIZE` (64 MB em x86-64, 1 MB em x86), e começam com uma struct `heap_info` cujo primeiro campo, `ar_ptr`, aponta para a arena. Então, para um chunk `p` com o bit `A` ligado, a arena é **o ponteiro guardado no endereço `p & ~0x3ffffff`**. Se esse endereço estiver em memória que você controla, você escolhe a arena.
+
+<Mem
+  title="O que o free lê para um chunk com o bit A ligado (x86-64)"
+  cellW={290}
+  rows={[
+    {addr: 'p & ~0x3ffffff', cells: [{label: 'ar_ptr = &arena falsa', kind: 'ctrl'}], note: 'heap_info forjado'},
+    {label: '...', kind: 'neutral'},
+    {addr: 'p', cells: [{label: 'prev_size', kind: 'meta'}, {label: 'size | A=1', kind: 'danger'}]},
+    {label: 'dados', kind: 'data'},
+  ]}
+/>
+
+## Pré-requisitos
+
+1. **Ligar o bit `A` no `size` de um chunk** que será liberado: overflow ou UAF de escrita de 1 byte basta.
+2. **Controlar o conteúdo do endereço `p & ~(HEAP_MAX_SIZE - 1)`**. Na heap principal, isso significa o primeiro endereço múltiplo de 64 MB **acima** do início da heap: aloque chunks até a heap cruzar essa fronteira (uma alocação grande o suficiente para passar por ela, ainda abaixo do limiar de `mmap`, ou muitas pequenas) e escreva o `heap_info` falso lá.
+3. **Uma arena falsa** em um endereço conhecido, com os poucos campos que o `free` lê coerentes (abaixo).
+4. **Leak da heap**, para saber onde a fronteira cai e onde a arena falsa está.
+
+## Variante fastbin (funciona hoje)
+
+Libere um chunk de tamanho de fastbin (`0x20` a `0x80`) com o bit `A` ligado. O `free` trava o `mutex` da arena falsa e faz:
+
+```c
+fb = &fastbin(av, fastbin_index(size));   // av = arena falsa
+p->fd = *fb;
+*fb = p;                                  // escreve p em av->fastbinsY[idx]
+```
+
+Ou seja, o endereço do chunk é escrito em **`arena_falsa + 0x10 + 8 * idx`** (o array `fastbinsY` começa depois de `mutex` e `flags`). Posicione a arena falsa de modo que esse endereço seja o seu alvo. O que o `free` confere na arena falsa:
+
+| Campo (x86-64) | Offset | Precisa ser |
+|---|---|---|
+| `mutex` | `0x0` | `0` (destravado), senão o `free` fica esperando |
+| `flags` | `0x4` | Qualquer coisa |
+| `fastbinsY[idx]` | `0x10 + 8*idx` | O **alvo**: o `free` escreve `p` aqui. O valor antigo não pode ser `p` (`double free or corruption (fasttop)`) |
+| `system_mem` | `0x888` | Maior que o `size` do chunk vizinho (`free(): invalid next size (fast)`) |
+| `have_fastchunks` | `0x8` | Gravável: o `free` escreve `true` aqui (glibc ≥ 2.27) |
+
+Além disso, o chunk precisa de um vizinho com `size` plausível (`> 0x10` e `< system_mem`), e **o tcache do tamanho precisa estar cheio** (7 chunks), ou o `free` o coloca lá e nunca olha a arena. O resultado é uma escrita de um **endereço da heap** no alvo: útil para sobrescrever um `size` (criando overlapping chunks), um ponteiro de dados de outra nota, ou qualquer lugar onde "um endereço válido da heap" baste, como um ponteiro que o programa segue depois.
+
+## Variante original: unsorted bin (glibc < 2.11)
+
+Com um chunk maior que fastbin, o `free` o coloca na unsorted bin da arena:
+
+```c
+bck = unsorted_chunks(av);       // &av->bins[0] - 0x10
+fwd = bck->fd;                   // av->bins[0], que você controla
+p->bk = bck;
+p->fd = fwd;
+fwd->bk = p;                     // escreve p em (av->bins[0]) + 0x18
+bck->fd = p;
+```
+
+Colocando `av->bins[0] = alvo - 0x18`, o `free` escreve `p` no alvo. O paper usava isso para sobrescrever a `.dtors` ou a GOT com o endereço do chunk, que continha shellcode. A glibc 2.11 adicionou `if (fwd->bk != bck) malloc_printerr("free(): corrupted unsorted chunks")`, que exige que o alvo já aponte de volta para a arena falsa, e a técnica morreu.
+
+## Mitigações
+
+- `free(): corrupted unsorted chunks` (2.11) matou a variante unsorted.
+- Para a variante fastbin, o que existe são as checagens listadas na tabela (`mutex`, `system_mem`, `fasttop`), todas contornáveis porque a arena é sua. O que limita o ataque na prática é o pré-requisito 2: precisar de **64 MB de heap** para alcançar a fronteira. Desafios com limite de alocações ou de tamanho inviabilizam.
+- O tcache, por ficar na frente, exige encher o bin antes do `free`.
+
+## Resumo
+
+1. Leve a heap até um endereço múltiplo de `HEAP_MAX_SIZE` e escreva lá `ar_ptr = arena_falsa`
+2. Monte a arena falsa com `mutex = 0`, `system_mem` grande e o alvo em `fastbinsY[idx]`
+3. Ligue o bit `A` no `size` de um chunk de fastbin e dê `free` → `*alvo = p`

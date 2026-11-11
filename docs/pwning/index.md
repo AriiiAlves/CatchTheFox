@@ -2,7 +2,7 @@
 title: "Pwning"
 ---
 
-Pwning (binary exploitation) é transformar um bug de memória em controle do programa: ler o que não devia, escrever onde não devia e, no fim, executar o que você quiser. Esta seção assume que você já passou pela [Introdução](../introduction/index.md) (assembly, stack, GDB, Ghidra e pwntools).
+Pwning (binary exploitation) é transformar um bug de memória em controle do programa: ler o que não devia, escrever onde não devia e, no fim, executar o que você quiser. Esta seção assume que você já passou pela [Introdução a Pwn/Rev](../introduction/index.md) (assembly, stack, GDB, Ghidra e pwntools).
 
 :::tip Índice
 A [Checklist de Pwning](./checklist.mdx) lista todos os tópicos, o que já está escrito e o que ainda falta.

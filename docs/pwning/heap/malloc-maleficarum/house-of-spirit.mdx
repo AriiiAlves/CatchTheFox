@@ -1,0 +1,83 @@
+---
+title: The House of Spirit
+sidebar_position: 5
+---
+
+House of Spirit é o caminho inverso dos outros ataques: em vez de corromper um chunk de verdade, você faz o programa dar **`free` em um endereço que nunca foi alocado** (a stack, a `.bss`, qualquer lugar onde consiga escrever um header falso). O chunk falso entra em uma lista, e o `malloc` seguinte daquele tamanho o devolve. Resultado: um ponteiro "da heap" apontando para onde você quis, e o programa escreve lá achando que é uma nota. Funciona em **todas as versões** da glibc, e ficou mais fácil com o tcache.
+
+## Pré-requisitos
+
+1. **Controlar o ponteiro passado ao `free`**: um overflow na stack que alcança uma variável `char *p` antes do `free(p)`, um índice sem validação em um array de ponteiros, um ponteiro parcialmente sobrescrito, uma format string...
+2. **Escrever um `size` falso em `alvo - 0x8`** (o header do chunk falso começa em `alvo - 0x10`), e, para a fastbin, um segundo `size` plausível depois do chunk falso.
+3. **Conhecer o endereço do alvo**, para colocá-lo no ponteiro (leak da stack, ou `.bss` sem PIE).
+4. Um `malloc` do **mesmo tamanho** depois, cujo conteúdo você controla.
+
+## O ataque
+
+<Mem
+  title="Chunk falso na stack (fastbin ou tcache de 0x40)"
+  top="endereços baixos"
+  bottom="endereços altos"
+  cellW={270}
+  rows={[
+    {addr: 'alvo-0x10', cells: [{label: 'prev_size (qualquer)', kind: 'meta'}, {label: 'size = 0x40', kind: 'danger'}], note: 'header falso'},
+    {addr: 'alvo', label: 'o que o malloc vai devolver', kind: 'ctrl', h: 1.6},
+    {label: 'return address', kind: 'danger', note: 'dentro dos 0x30 bytes de dados'},
+    {addr: 'alvo+0x30', cells: [{label: '(prev_size)', kind: 'meta'}, {label: 'size vizinho = 0x40', kind: 'meta'}], note: 'só a fastbin confere'},
+  ]}
+/>
+
+1. Escreva o header falso: `size` com o tamanho que o programa vai pedir depois (arredondado como `malloc` faz: `malloc(0x30)` → `0x40`). Os bits de flag não importam, exceto `A` e `M`, que devem estar desligados.
+2. Faça `free(alvo)`. O chunk falso entra no tcache (ou na fastbin) daquele tamanho.
+3. `malloc(0x30)` devolve `alvo`. O que o programa escrever nele cai na stack, em cima do endereço de retorno.
+
+### O que o `free` confere
+
+O chunk falso só precisa passar pelas verificações do caminho que vai seguir:
+
+| Verificação | Onde | Como passar |
+|---|---|---|
+| `free(): invalid pointer` | Sempre | `alvo` alinhado em 16 bytes e `size` sem estourar o espaço de endereços |
+| `free(): invalid size` | Sempre | `size >= 0x20` e múltiplo de 16 |
+| `free(): double free detected in tcache 2` | Tcache, glibc ≥ 2.29 | Os 8 bytes em `alvo + 8` (a `key`) não podem ser iguais à chave do tcache: qualquer outro valor serve |
+| `free(): invalid next size (fast)` | **Só fastbin** | Em `alvo - 0x10 + size + 8` precisa haver um valor entre `0x20` e `av->system_mem` (`0x21000` em uma heap pequena) |
+
+Com tcache (glibc ≥ 2.26) e o bin não cheio, **não há verificação do vizinho**: só o alinhamento e a faixa do `size` (`0x20` a `0x410`). É o caso mais simples. Na fastbin (glibc < 2.26 ou tcache cheio), o tamanho fica limitado a `0x80` e o `size` do "próximo chunk" precisa existir; na stack, costuma dar para usar outra variável ou o próprio input para colocá-lo.
+
+## Exemplo
+
+```c
+// Funciona em qualquer glibc. Com tcache (>= 2.26), o size do vizinho nem é lido.
+#include <stdio.h>
+#include <stdlib.h>
+
+int main() {
+    unsigned long fake[10];                     // na stack
+    char *p;
+
+    fake[1] = 0x40;                             // size do chunk falso (8 slots de 8 = 0x40)
+    fake[9] = 0x40;                             // size do "vizinho", só para a fastbin (glibc < 2.26)
+
+    p = (char *)&fake[2];                       // "overflow": o ponteiro que será liberado aponta para a stack
+    free(p);                                    // chunk falso entra no tcache/fastbin de 0x40
+
+    char *evil = malloc(0x30);                  // devolve &fake[2]
+    printf("fake: %p, evil: %p\n", (void *)&fake[2], (void *)evil);
+}
+```
+
+Em um exploit, o roteiro típico de stack é: a função tem um buffer e um ponteiro `p` logo depois dele, e termina com `free(p)`. O overflow preenche o buffer com o header falso no lugar certo e troca `p` pelo endereço do buffer. Na heap, a mesma técnica serve para criar **chunks sobrepostos**: libere um endereço no meio de um chunk grande (com um `size` falso escrito nos dados dele) e aloque-o de volta.
+
+## Mitigações
+
+- As verificações da tabela acima são tudo o que existe. Nenhuma delas confere se o endereço **está na heap**.
+- Safe Linking (glibc ≥ 2.32) não atrapalha: quem calcula o `fd` do chunk falso é o próprio `free`.
+- A `key` do tcache (2.29) só exige que `alvo + 8` não contenha a chave, o que acontece sozinho.
+
+Por isso a House of Spirit é a técnica do paper original que **menos mudou** em 20 anos. Ela também é o motivo de `free` em ponteiros controlados ser tratado como bug crítico mesmo sem nenhum overflow na heap.
+
+## Resumo
+
+1. Escreva `size` em `alvo - 0x8` (e, para fastbin, um `size` plausível em `alvo - 0x10 + size + 0x8`)
+2. `free(alvo)`
+3. `malloc(size - 0x10)` devolve `alvo`

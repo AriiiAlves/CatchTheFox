@@ -96,9 +96,11 @@ Quer escrever um dos que faltam? Veja como contribuir no [repositório](https://
 
 | | Tópico | O que é |
 |:-:|---|---|
+| ✅ | [House of Prime](./heap/malloc-maleficarum/house-of-prime.mdx) | Dois `free` com `size` controlado trocam a arena por uma falsa (glibc 2.3.x, histórica) |
+| ✅ | [House of Mind](./heap/malloc-maleficarum/house-of-mind.mdx) | Bit `A` no `size` → `free` usa arena forjada → escrita de um ponteiro da heap |
 | ✅ | [House of Force](./heap/malloc-maleficarum/house-of-force.mdx) | `size` do top chunk gigante → `malloc` em qualquer endereço (glibc < 2.29) |
-| ⬜ | House of Spirit | `free` em chunk falso → o próximo `malloc` devolve região controlada |
-| ⬜ | House of Lore | Corromper o `bk` de um chunk na smallbin |
+| ✅ | [House of Lore](./heap/malloc-maleficarum/house-of-lore.mdx) | Corromper o `bk` de um chunk na smallbin → `malloc` devolve chunk falso |
+| ✅ | [House of Spirit](./heap/malloc-maleficarum/house-of-spirit.mdx) | `free` em chunk falso → o próximo `malloc` devolve região controlada |
 | ⬜ | House of Einherjar | Off-by-null + `prev_size` falso → consolidação para trás e overlap |
 | ⬜ | House of Orange | Sem `free`: encolher o top chunk para ele ir à unsorted bin; + FSOP |
 | ⬜ | House of Botcake | Double free entre tcache e unsorted bin, contorna a tcache key |

@@ -10,6 +10,8 @@ pwndbg: `curl -qsL 'https://install.pwndbg.re' | sh -s -- -t pwndbg-gdb` e execu
 Para navegação:
 
 - `break main` , `run`  - Define ponto de parada e roda
+- `start` / `starti` - Roda e para na `main` / na primeira instrução (`_start`). Útil em binários stripped ou com PIE (os endereços só existem depois de iniciar)
+- `run < input.txt`, `run arg1` - Entrada e argumentos, como no shell
 - `continue` - Avança até encontrar um breakpoint ou fim do programa. Não para entre instruções.
 - `next` / `step` - Próxima linha do código fonte (só com debug symbols). `next` pula chamadas de função, `step` entra
 - `nexti` (`ni`) - Próxima instrução Assembly, pulando chamadas de função
@@ -45,6 +47,8 @@ Para ver o stack frame (seção da stack alocada para uma única função)
 - `set *0x08048451 = 0xfacade` - Muda valor armazenado no endereço (4 bytes. Para 8: `set {long}0x08048451 = 0xfacade`)
 - `set $rax = 0x10` - Muda valor de registrador
 - `bt` - Backtrace (pilha de chamadas)
+- `watch *(long *)0x404040` - Para quando o endereço for escrito (`rwatch` lido, `awatch` ambos)
+- `set disable-randomization off` - Liga o ASLR dentro do GDB (desligado por padrão)
 - `vmmap` (pwndbg/GEF) - Mapa da memória (base da libc, heap, stack e permissões)
 - `search AAAA` (pwndbg) - Procura bytes na memória (útil para achar seu input)
 - `cyclic 200` / `cyclic -l 0x61616173` (pwndbg) - Gera padrão De Bruijn / acha o offset

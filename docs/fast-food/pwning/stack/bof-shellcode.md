@@ -59,7 +59,7 @@ shellcraft.cat('/flag')              # Lê e imprime um arquivo (quando não dá
 shellcraft.open('/flag'), shellcraft.read(fd, buf, n), shellcraft.write(1, buf, n)
 ```
 
-Lista completa: [Principais Funções Shellcraft](../../extra/shellcraft.mdx).
+Lista completa: [Principais Funções Shellcraft](../../../extra/shellcraft.mdx).
 
 Exemplo: 
 

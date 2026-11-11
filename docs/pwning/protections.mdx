@@ -20,6 +20,13 @@ checksec --file=./arquivo    # pacote do apt
 
 - **Arch**: arquitetura, tamanho da palavra e [endianness](../introduction/endianness.mdx). `i386-32-little` é x86 de 32 bits; `amd64-64-little` é x86-64.
 - **Stripped**: se os símbolos foram removidos (veja [Debugging com GDB](../introduction/gdb.md#compilando-sem--g--stripped)).
+- **Symbols / Debuginfo**: se a tabela de símbolos e as informações de debug (`-g`) estão presentes. Facilitam a análise, não mudam o ataque.
+- **Fortified / Fortifiable**: quantas chamadas a funções perigosas foram trocadas pelas versões `_chk` do [Fortify](#fortify-source), do total que poderia ser.
+- **RPATH / RUNPATH**: caminhos extras onde o loader procura bibliotecas (veja [RPATH e RUNPATH](#rpath-e-runpath)).
+- **Stack: Executable** e **RWX**: se a stack é executável e se há segmentos com permissão de escrita e execução ao mesmo tempo (veja [NX](#nx-no-execute-ou-dep-data-execution-prevention)).
+- **SHSTK / IBT**: se o binário foi compilado com suporte ao [CET](#cet-shadow-stack-e-ibt).
+
+Versões recentes do pwntools também mostram **Stack Clash** (`-fstack-clash-protection`) e, no Linux, o `checksec` do apt ainda reporta **Seccomp** e **SELinux** do sistema.
 
 ## Resumo
 
@@ -31,7 +38,13 @@ checksec --file=./arquivo    # pacote do apt
 | **PIE** | Usar endereços fixos do binário | Vazar um endereço do binário; partial overwrite |
 | **ASLR** | Usar endereços fixos de libc, stack e heap | Vazar um endereço da região; partial overwrite |
 | **Fortify** | Alguns overflows e `%n` | Depende do caso; muitas funções não são cobertas |
-| **CET** (IBT + Shadow Stack) | JOP/COP e ROP | Em geral não é aplicado em user space nos CTFs |
+| **CET** (Shadow Stack + IBT) | ROP e JOP/COP | Em geral não é aplicado em user space nos CTFs |
+| **Stack Clash Protection** | Pular a página de guarda entre stack e heap | Não afeta exploits de CTF; só impede o *stack clash* |
+| **RPATH / RUNPATH** | (não é mitigação) Caminho de bibliotecas | Indica onde a libc do desafio foi colocada; em privesc, *library hijacking* |
+| **Pointer Guard** (glibc) | Sobrescrever ponteiros de `setjmp`, `atexit` e `tls_dtor_list` | Vazar ou sobrescrever o cookie em `fs:0x30` |
+| **Safe Linking** (glibc ≥ 2.32) | Forjar ponteiros `fd` no tcache/fastbin | Vazar um endereço da heap |
+| **seccomp** | Syscalls (em geral `execve`) | Chain/shellcode de `open`/`read`/`write` |
+| **CFI / SafeStack** (clang) | Chamadas indiretas fora do conjunto esperado; overflow até o return address | Raros em CTFs; atacar dados em vez de ponteiros de código |
 
 ## RELRO (Relocation Read-Only)
 
@@ -95,6 +108,15 @@ Páginas de dados (stack, heap, `.data`, `.bss`) são mapeadas sem permissão de
 
 Confira as permissões reais com `vmmap` no pwndbg/GEF. Um binário com `NX disabled` ou `Stack: Executable` é um convite para shellcode.
 
+### Stack executável e segmentos RWX
+
+O `checksec` mostra duas coisas relacionadas ao NX:
+
+- **Stack: Executable**: o binário pede, pelo cabeçalho `PT_GNU_STACK` (`-z execstack`), uma stack executável. É o que `NX disabled` significa na prática. Em kernels antigos, isso também tornava a heap e a `.bss` executáveis (`READ_IMPLIES_EXEC`); nos atuais (≥ 5.8), só a stack.
+- **RWX: Has RWX segments**: algum segmento do binário é gravável **e** executável ao mesmo tempo, em geral por um linker script ou por código gerado à mão (`-N`/`--omagic`, binários de shellcoding). Shellcode pode ser escrito e executado ali mesmo, sem depender da stack.
+
+Com NX, o jeito de ainda rodar shellcode é criar uma região executável em tempo de execução: `mprotect(addr, len, 7)` em uma região existente, ou `mmap` de uma nova. Ambas precisam de uma ROP curta (ou de uma única chamada com os argumentos certos). Desafios de *shellcoding* costumam fazer isso por você e só pedem o shellcode.
+
 ## PIE (Position-Independent Executable) + ASLR (Address Space Layout Randomization)
 
 São duas coisas diferentes que se complementam:
@@ -129,11 +151,57 @@ Efeitos relevantes:
 - Overflows simples em buffers de tamanho conhecido passam a abortar (`*** buffer overflow detected ***`).
 - Em [Format Strings](./stack/format-strings.md), o `__printf_chk` recusa `%n` quando a format string está em memória gravável, e recusa acessos posicionais (`%7$p`) que pulem argumentos. Leaks com `%p` em sequência continuam funcionando.
 
-## IBT (Indirect Branch Tracking)
+## CET: Shadow Stack e IBT
 
-O IBT faz parte do Intel CET (Control-flow Enforcement Technology), junto com o Shadow Stack:
+O Intel CET (Control-flow Enforcement Technology) tem duas partes, que o `checksec` mostra como `SHSTK` e `IBT`:
 
 - **IBT**: todo `jmp`/`call` **indireto** precisa cair em uma instrução `endbr64` (`endbr32` em 32 bits). Protege contra JOP/COP. Não verifica `ret`.
 - **Shadow Stack**: mantém uma cópia protegida dos endereços de retorno e compara a cada `ret`. É o que protege contra ROP.
 
 Na prática, o Linux ainda não aplica IBT em user space, e o Shadow Stack depende de kernel, glibc e hardware recentes e precisa ser habilitado. Nos CTFs, o `endbr64` no início das funções quase sempre é só um NOP de 4 bytes. Ele só importa para calcular endereços: ao pular o prólogo de uma função, lembre que ele ocupa espaço (veja [Alinhamento da stack](./stack/buffer-overflow/return-address.md#cuidado-ao-sobrescrever-return-address-desalinhamento-de-stack)).
+
+Quando o Shadow Stack **está** ativo (binário com `SHSTK`, glibc ≥ 2.39 com `GLIBC_TUNABLES=glibc.cpu.hwcaps=SHSTK` ou o default da distro, kernel ≥ 6.6 e CPU com suporte), qualquer `ret` para um endereço que não foi colocado pela `call` correspondente mata o processo (`SIGSEGV` com código `SEGV_CPERR`). Nesse cenário, ROP clássica não funciona e o ataque migra para dados: ponteiros de função, estruturas `FILE`, a GOT, ou SROP (o kernel restaura o Shadow Stack a partir de um *token*, então um `sigreturn` forjado precisa de um token válido).
+
+## Stack Clash Protection
+
+Com `-fstack-clash-protection` (padrão no gcc de várias distribuições desde 2018), funções que alocam muito espaço na stack (`alloca`, VLAs, buffers gigantes) tocam cada página do espaço alocado em vez de só mover o `rsp` de uma vez. Isso impede o *stack clash*: fazer o `rsp` pular por cima da **página de guarda** que separa a stack de outras regiões (heap, bibliotecas) e passar a escrever nelas.
+
+Para o pwn de CTF usual (overflow em um buffer de tamanho fixo), essa proteção não muda nada. Ela só importa em desafios em que você controla o tamanho de um `alloca`/VLA, e aí a saída é usar o tamanho para mover o `rsp` **dentro** da stack (por exemplo, para fazer dois frames se sobreporem) e não para fora dela.
+
+## RPATH e RUNPATH
+
+Não são mitigações, mas aparecem no `checksec`. São caminhos extras, gravados no binário, onde o dynamic linker procura bibliotecas antes dos diretórios padrão (`RPATH` vem antes de `LD_LIBRARY_PATH`; `RUNPATH`, depois). Dois usos em CTF:
+
+- **Desafios de pwn**: um `RUNPATH` de `.` ou `./libs` significa que o binário foi preparado para carregar a libc da pasta do desafio (é o que o `pwninit`/`patchelf --set-rpath` fazem). A libc que você precisa estudar é essa.
+- **Privesc / misc**: um binário SUID com `RPATH` apontando para um diretório gravável permite trocar uma biblioteca por uma sua (*library hijacking*). `readelf -d ./bin | grep -i path` mostra os caminhos.
+
+## Pointer Guard (PTR_MANGLE)
+
+A glibc protege alguns ponteiros de função que ficam em memória gravável, codificando-os com um cookie aleatório por processo (`fs:0x30` em x86-64, a *pointer guard* da TLS):
+
+```c
+#define PTR_MANGLE(p)   ((p) ^ fs:0x30) rotacionado 0x11 bits para a esquerda
+#define PTR_DEMANGLE(p) (rotacionar 0x11 para a direita) ^ fs:0x30
+```
+
+Isso vale para os registradores salvos por `setjmp`/`longjmp`, para os handlers de `atexit`/`on_exit` (`__exit_funcs`) e para `tls_dtor_list`. Sobrescrever um desses ponteiros com um endereço "cru" faz o programa pular para lixo. Para usar esses alvos, é preciso **vazar o cookie** (ler `fs:0x30`, que fica na TLS, perto do canary) ou **zerá-lo** com uma escrita arbitrária, e aí codificar o valor você mesmo. Hooks como `__free_hook` (glibc < 2.34), a GOT e as vtables de `FILE` **não** são protegidos assim, e por isso são alvos mais simples.
+
+## Safe Linking (heap, glibc ≥ 2.32)
+
+Os ponteiros `fd` das listas simples do alocador (tcache e fastbin) são guardados como `fd ^ (endereço_do_chunk >> 12)`. Um valor forjado sem conhecer um endereço da heap vira um ponteiro inválido. É a proteção que torna o leak da heap obrigatório em [Tcache Poisoning](./heap/tcache.mdx#tcache-poisoning); veja [Safe Linking](./heap/safe-linking.mdx).
+
+## seccomp
+
+Não é uma proteção do binário, mas o programa pode instalar um **filtro de syscalls** no início (`prctl(PR_SET_SECCOMP)` ou `seccomp_load`), e isso muda o payload final. O caso típico bloqueia `execve`/`execveat`, então `system("/bin/sh")`, `one_gadget` e shellcodes de shell não funcionam, e a saída é ler a flag diretamente: `open` + `read` + `write` (ORW), em ROP ou shellcode.
+
+```bash
+seccomp-tools dump ./chall      # mostra as regras do filtro como pseudo-código
+```
+
+Olhe o filtro com atenção: é comum ele deixar passar `openat` quando bloqueia `open`, `sendfile` quando bloqueia `read`/`write`, ou syscalls de 32 bits (`int 0x80`) quando só filtra as de 64 bits.
+
+## Outras mitigações (raras em CTF)
+
+- **CFI (Control-Flow Integrity)** e **SafeStack**, do clang: a CFI só permite chamadas indiretas para funções com a assinatura esperada; o SafeStack move os buffers para uma segunda stack, longe dos endereços de retorno. Aparecem em desafios de navegador/Android e em alguns de C++.
+- **PAC (Pointer Authentication)** e **MTE (Memory Tagging)**, do ARM64: assinam ponteiros de retorno e marcam a memória da heap com tags. Aparecem em desafios de ARM e de kernel.
+- **ASan/UBSan**: instrumentação de compilação que aborta em acessos inválidos. Não é mitigação de produção; se o binário do desafio tem ASan, o bug costuma ser lógico e não de memória.

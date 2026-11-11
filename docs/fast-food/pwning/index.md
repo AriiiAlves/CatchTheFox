@@ -2,7 +2,7 @@
 title: "Introdução"
 ---
 
-Este material é um handbook com os "macetes" para fazer pwning de forma prática. A teoria completa está em [Pwning](../../pwning/index.md).
+Este material é um handbook com os "macetes" para fazer pwning de forma prática, dividido em [Stack](./stack/bof-variables.md) e [Heap](./heap/index.md). A teoria completa está em [Pwning](../../pwning/index.md).
 
 ## Guia inicial
 
@@ -16,15 +16,16 @@ Este material é um handbook com os "macetes" para fazer pwning de forma prátic
 
 | Situação | Ataque |
 |----------|--------|
-| Input sem limite (`gets`, `scanf("%s")`, `read` maior que o buffer) | [Buffer Overflow](./bof-variables.md) |
-| BOF + função `win` no binário + `No PIE` | [BOF - Return Address](./bof-return-address.md) |
-| BOF + `NX disabled` | [BOF - Shellcode](./bof-shellcode.md) |
-| BOF + `NX enabled` | [ROP / ret2libc](./rop.md) |
+| Input sem limite (`gets`, `scanf("%s")`, `read` maior que o buffer) | [Buffer Overflow](./stack/bof-variables.md) |
+| BOF + função `win` no binário + `No PIE` | [BOF - Return Address](./stack/bof-return-address.md) |
+| BOF + `NX disabled` | [BOF - Shellcode](./stack/bof-shellcode.md) |
+| BOF + `NX enabled` | [ROP](./stack/rop.md) / [ret2libc](./stack/ret2libc.md) |
+| BOF pequeno (só cabe o return address) | [Stack Pivoting](./stack/stack-pivoting.md) |
 | BOF + `Canary` | Vazar o canary (format string, leitura fora do array) e mantê-lo no payload |
-| BOF + `PIE` | Vazar um endereço do binário (format string) ou [Partial Overwrite](./rop.md#partial-overwrite) |
-| `printf(input)` | [Format Strings](./format-strings.md): leak (`%p`) e escrita (`%n`) |
-| Format string + `Partial RELRO` | [GOT Overwrite](./got-overwrite.md) |
-| Binário estático pequeno, poucos gadgets | [SROP](./rop.md#srop) |
-| `malloc`/`free` no programa (notes, etc) | [Heap](./heap.md) |
+| BOF + `PIE` | Vazar um endereço do binário (format string) ou [Partial Overwrite](./stack/partial-overwrite.md) |
+| `printf(input)` | [Format Strings](./stack/format-strings.md): leak (`%p`) e escrita (`%n`) |
+| Format string + `Partial RELRO` | [GOT Overwrite](./stack/got-overwrite.md) |
+| Binário estático pequeno, poucos gadgets | [SROP](./stack/srop.md) |
+| `malloc`/`free` no programa (notes, etc) | [Heap](./heap/index.md) |
 | Índice de array vindo do usuário | Out-of-bounds: índice negativo/grande para ler/escrever a stack ou a `.bss` |
 | `srand(time(NULL))` / `rand()` | Bad seed: reproduza a sequência com `ctypes` (`libc.srand(seed); libc.rand()`) |

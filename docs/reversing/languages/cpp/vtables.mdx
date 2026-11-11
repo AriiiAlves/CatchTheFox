@@ -1,0 +1,99 @@
+---
+title: "Herança e Vtables"
+sidebar_position: 2
+---
+
+Quando uma classe tem métodos `virtual`, a chamada `obj->metodo()` não pode ser resolvida em tempo de compilação: depende do tipo real do objeto. O compilador resolve isso com uma **vtable** (tabela de métodos virtuais) por classe e um ponteiro escondido em cada objeto. Em reversing, é a principal fonte de `call [rax+0x10]` sem destino óbvio; em pwn, é o alvo clássico de um Use-After-Free em C++.
+
+## Herança sem `virtual`
+
+Sem métodos virtuais, herança é só **concatenação**: a classe derivada começa com os campos da base.
+
+```cpp
+struct Base    { int a; int b; };
+struct Derived : Base { int c; };     // layout: a (+0), b (+4), c (+8)
+```
+
+Um ponteiro `Base *` para um `Derived` é o mesmo endereço. Métodos da base são funções normais, chamadas com `call` direto. Nada no binário indica a herança, exceto os nomes mangled e a ordem dos campos.
+
+## Herança com `virtual`
+
+```cpp
+class Animal {
+public:
+    virtual void sound() { puts("..."); }
+    virtual ~Animal() {}
+    int legs;
+};
+class Dog : public Animal {
+public:
+    void sound() override { puts("Woof"); }
+};
+```
+
+Agora cada objeto ganha um ponteiro escondido no **offset 0**, o *vptr*, que aponta para a vtable da sua classe. `legs` passa para o offset `0x8`.
+
+<Side>
+  <Mem
+    title="Objeto Dog (x86-64)"
+    cellW={220}
+    rows={[
+      {addr: '+0x0', label: 'vptr → vtable de Dog + 16', kind: 'ptr'},
+      {addr: '+0x8', label: 'legs', kind: 'data'},
+    ]}
+  />
+  <Mem
+    title="_ZTV3Dog (vtable de Dog, em .data.rel.ro)"
+    cellW={220}
+    rows={[
+      {addr: '+0', label: 'offset-to-top = 0', kind: 'meta'},
+      {addr: '+8', label: '&typeinfo (_ZTI3Dog)', kind: 'meta'},
+      {addr: '+16', label: 'Dog::sound', kind: 'ctrl', note: 'vptr aponta aqui'},
+      {addr: '+24', label: 'Dog::~Dog (D1)', kind: 'ctrl'},
+      {addr: '+32', label: 'Dog::~Dog (D0, com delete)', kind: 'ctrl'},
+    ]}
+  />
+</Side>
+
+O vptr aponta para o **terceiro slot** da vtable (`_ZTV3Dog + 16`): os dois primeiros (`offset-to-top` e `typeinfo`) ficam "antes" do ponteiro. Os métodos aparecem na ordem de declaração na classe base; a derivada troca os slots que sobrescreve. Destrutores virtuais ocupam dois slots (`D1` destrói, `D0` destrói e chama `delete`).
+
+### No construtor
+
+O construtor escreve o vptr. É o jeito mais fácil de ligar uma classe à sua vtable em binário stripped:
+
+```nasm
+; Dog::Dog(this)
+lea    rax, [rip + _ZTV3Dog+16]
+mov    QWORD PTR [rdi], rax        ; this->vptr = &vtable + 16
+```
+
+Antes disso, o construtor de `Dog` chama o de `Animal`, que escreve o vptr de `Animal`; o de `Dog` sobrescreve. Por isso um construtor de classe derivada tem duas escritas em `[rdi]`.
+
+### Na chamada
+
+```nasm
+; a->sound();   a é Animal*
+mov    rax, QWORD PTR [rbp-0x18]   ; a
+mov    rax, QWORD PTR [rax]        ; vptr
+mov    rdx, QWORD PTR [rax]        ; slot 0 → sound
+mov    rdi, QWORD PTR [rbp-0x18]   ; this
+call   rdx
+```
+
+O padrão **`mov rax, [obj]; call [rax + 8*n]`** é uma chamada virtual do método no slot `n`. O decompilador mostra algo como `(**(code **)(*a + 0x10))(a)`.
+
+## Descobrindo qual função é chamada
+
+1. Ache qual classe o objeto tem: suba até o `new` e o construtor, ou leia o vptr em tempo de execução no GDB (`x/gx obj` e depois `info symbol <valor>` mostra `_ZTV3Dog+16`).
+2. Vá até a vtable (`_ZTV3Dog`) e conte os slots: `call [rax+0x10]` = slot 2 = terceiro ponteiro a partir de `+16`.
+3. No Ghidra, para não contar na mão: crie uma struct `Dog_vtable` com um campo ponteiro de função por slot, aplique-a no endereço `_ZTV3Dog+16`, e coloque `Dog_vtable *vptr` como primeiro campo da struct `Dog`. As chamadas viram `this->vptr->sound(this)`.
+4. Em binário stripped, as vtables ainda são reconhecíveis: um array de ponteiros para código na `.data.rel.ro`, precedido de um ponteiro para uma `typeinfo` (que aponta para a string `_ZTS...` com o nome da classe). O comando `info vtbl obj` do GDB funciona com símbolos.
+
+## Herança múltipla
+
+Com duas bases polimórficas, o objeto tem **dois vptrs**, e converter o ponteiro para a segunda base **soma um offset** (`add rdi, 0x10` antes de um `call`). O `offset-to-top` da vtable secundária é negativo e serve para voltar ao início do objeto. Métodos chamados pela segunda base entram por *thunks* (funções minúsculas chamadas `non-virtual thunk to Dog::f()` que ajustam `this` e pulam para o método real). Se você ver `sub rdi, 0x10; jmp Dog::f`, é isso.
+
+## Referências
+
+- [Itanium C++ ABI - Virtual Table Layout](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vtable) - Especificação do layout usado por GCC e Clang.
+- [Reversing C++ Virtual Functions (Alschwalm)](https://alschwalm.com/blog/static/2016/12/17/reversing-c-virtual-functions/) - Série sobre reconhecer e reconstruir vtables.
