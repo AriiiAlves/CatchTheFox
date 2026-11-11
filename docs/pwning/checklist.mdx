@@ -1,0 +1,157 @@
+---
+title: Checklist de Pwning
+sidebar_position: 0
+description: Índice dos tópicos de pwning para CTFs, com o que já está disponível no CatchTheFox e o que ainda falta escrever.
+---
+
+Mapa dos tópicos de pwning que aparecem em CTFs. Serve como índice do que já existe no site e como lista do que ainda falta escrever.
+
+- ✅ disponível (o nome é o link para a página)
+- 🟡 coberto só em parte, dentro de outra página
+- ⬜ ainda não escrito
+
+Quer escrever um dos que faltam? Veja como contribuir no [repositório](https://github.com/AriiiAlves/CatchTheFox#contribuindo).
+
+## Fundamentos
+
+| | Tópico | O que é |
+|:-:|---|---|
+| ✅ | [Proteções de binários](./protections.mdx) | RELRO, Canary, NX, PIE/ASLR, Fortify, CET, e o que cada uma bloqueia |
+| ✅ | [Convenção de chamada](../extra/call-convention.mdx) | Onde ficam argumentos e retorno em x86 e x86-64 |
+| ✅ | [pwntools](../introduction/pwntools.md) | Tubes, packing, `ELF`, `ROP`, `gdb.attach` |
+| ✅ | [GDB / pwndbg](../introduction/gdb.md) | Debug de exploits |
+| 🟡 | Rodar o binário com a libc do desafio | `pwninit`, `patchelf`, Docker do desafio. Citado em [Versões da glibc](./heap/glibc-versions.mdx) |
+| ⬜ | Identificar a libc remota | `libc.rip`, libc-database, leak de dois símbolos |
+| ⬜ | Diferenças local × remoto | Buffering, `socat`, offsets de ambiente, timeouts |
+
+## Stack
+
+| | Tópico | O que é |
+|:-:|---|---|
+| ✅ | [Buffer Overflow](./stack/buffer-overflow/index.md) | Escrever além do buffer na stack |
+| ✅ | [BOF: variáveis](./stack/buffer-overflow/variables.md) | Sobrescrever variáveis locais vizinhas |
+| ✅ | [BOF: return address (ret2win)](./stack/buffer-overflow/return-address.md) | Desviar o fluxo para uma função existente; alinhamento da stack |
+| ✅ | [BOF: shellcode](./stack/buffer-overflow/shellcode.md) | Injetar e executar código (NX desligado) |
+| ✅ | [Sequências de De Bruijn](./stack/buffer-overflow/debruijn.mdx) | Achar offsets com `cyclic` |
+| 🟡 | Bypass de Canary | Leak (format string, `\0` sobrescrito), brute force byte a byte em `fork`. Citado em [Proteções](./protections.mdx) |
+| ⬜ | Off-by-one na stack | Sobrescrever 1 byte do `rbp` salvo e pivotar no `leave` seguinte |
+| ⬜ | Variáveis não inicializadas | Reaproveitar lixo de frames anteriores para leak ou controle |
+| ⬜ | Sobrescrita do master canary (TLS) | Overflow em thread alcança o canary de referência em `fs:0x28` |
+
+## Format Strings
+
+| | Tópico | O que é |
+|:-:|---|---|
+| ✅ | [Format Strings](./stack/format-strings.md) | Leak com `%p`, leitura com `%s`, escrita com `%n` |
+| ✅ | [GOT Overwrite](./stack/got-overwrite.md) | Trocar uma entrada da GOT (ex: `printf` → `system`) |
+| ⬜ | Format string com buffer fora da stack | Buffer na heap/`.bss`: escrever via cadeias de ponteiros da stack (`rbp` chain, `argv`) |
+| ⬜ | Blind format string | Sem o binário: despejar memória com `%s` até reconstruir o ELF |
+| ⬜ | Format string de um disparo | Uma única chamada: `.fini_array`, `__libc_atexit`, loop de volta para a `main` |
+
+## ROP
+
+| | Tópico | O que é |
+|:-:|---|---|
+| ✅ | [ROP](./stack/rop/index.mdx) | Encadear gadgets terminados em `ret`; tipos de gadget; ROP com syscall |
+| ✅ | [ret2libc / ret2system](./stack/rop/ret2libc.mdx) | Leak com `puts(puts@got)` e `system("/bin/sh")` |
+| ✅ | [Partial Overwrite](./stack/rop/partial-overwrite.mdx) | Trocar só os bytes baixos de um endereço para contornar PIE/ASLR |
+| ✅ | [Stack Pivoting](./stack/rop/stack-pivoting.mdx) | Mover `rsp` para uma região controlada (`leave; ret`) |
+| ✅ | [SIGROP (SROP)](./stack/rop/sigrop.mdx) | `sigreturn` com frame forjado para controlar todos os registradores |
+| 🟡 | one_gadget | Endereço na libc que abre shell sem argumentos. Citado em [ROP](./stack/rop/index.mdx) |
+| ⬜ | ret2csu | Gadgets de `__libc_csu_init` para controlar `rdx`/`rsi`/`edi` (glibc < 2.34) |
+| ⬜ | ret2dlresolve | Forjar estruturas de relocação para o `ld.so` resolver `system` sem leak |
+| ⬜ | ORW (open-read-write) | Chain ou shellcode para ler a flag quando `execve` é bloqueado por seccomp |
+| ⬜ | ret2vdso / vsyscall | Gadgets em regiões mapeadas pelo kernel |
+| ⬜ | JOP / COP | Encadear por `jmp`/`call` indiretos em vez de `ret` |
+| ⬜ | BROP (Blind ROP) | ROP sem o binário, em servidores que fazem `fork` |
+| ⬜ | `mprotect` + shellcode | ROP curto que torna uma região executável e pula para ela |
+
+## Shellcoding
+
+| | Tópico | O que é |
+|:-:|---|---|
+| ✅ | [Shellcode e syscalls](./stack/buffer-overflow/shellcode.md) | `execve`, `read`/`write`/`open`, reverse shell, NOP sled |
+| ✅ | [Referência do shellcraft](../extra/shellcraft.mdx) | Shellcodes prontos do pwntools |
+| ✅ | [Tabela de syscalls](../extra/syscall-table.mdx) | Números de syscall x86 e x86-64 |
+| ⬜ | Shellcode com restrições | Sem bytes nulos, alfanumérico, só imprimível, tamanho mínimo, stagers |
+| ⬜ | seccomp | Ler filtros com `seccomp-tools`; bypass por `openat`/`sendfile`, troca de arquitetura (`retf`), `io_uring` |
+| ⬜ | Shellcode sem saída (side channel) | Vazar a flag bit a bit por tempo ou crash |
+
+## Heap (glibc)
+
+### Base
+
+| | Tópico | O que é |
+|:-:|---|---|
+| ✅ | [Fundamentos da heap](./heap/index.mdx) | Chunks, bins, top chunk, algoritmo do `malloc` |
+| ✅ | [Tcache e tcache keys](./heap/tcache.mdx) | Tcache poisoning, leak de libc, bypass da `key` |
+| ✅ | [Safe Linking](./heap/safe-linking.mdx) | Ofuscação do `fd` (glibc ≥ 2.32) e como forjar ponteiros |
+| ✅ | [Ataques por versão da glibc](./heap/glibc-versions.mdx) | O que funciona em cada versão |
+| ⬜ | Heap grooming (feng shui) | Controlar o layout para deixar a vítima ao lado do chunk vulnerável |
+| ⬜ | Alvos de escrita arbitrária | `__free_hook`/`__malloc_hook` (< 2.34), `environ` → ROP, GOT da libc, `exit` handlers, `tls_dtor_list` |
+
+### Vulnerabilidades e primitivas
+
+| | Tópico | O que é |
+|:-:|---|---|
+| ✅ | [Heap Overflow](./heap/heap-overflow.mdx) | Sobrescrever o chunk vizinho |
+| ✅ | [Use-After-Free](./heap/uaf.mdx) | Ler/escrever/executar por um ponteiro já liberado |
+| ✅ | [Double Free (fastbin dup)](./heap/double-free.mdx) | Mesmo chunk duas vezes na lista → `malloc` em endereço arbitrário |
+| ✅ | [Unlink](./heap/unlink.mdx) | Escrita via `unlink` com chunk falso |
+| ✅ | [Leak de libc pela unsorted bin](./heap/malloc-consolidate.mdx) | `fd`/`bk` apontando para a `main_arena`; `malloc_consolidate` |
+| ⬜ | Off-by-one / poison null byte | 1 byte no `size` do vizinho → chunks sobrepostos |
+| ⬜ | Overlapping chunks | Dois ponteiros válidos para a mesma memória a partir de `size` corrompido |
+| ⬜ | Unsorted bin attack | Escrever um ponteiro da libc em endereço arbitrário (glibc < 2.29) |
+| ⬜ | Largebin attack | Escrever um endereço da heap em local arbitrário via `bk_nextsize` |
+| ⬜ | Tcache stashing unlink | Abusar da migração smallbin → tcache |
+| ⬜ | Ataque à `tcache_perthread_struct` | Controlar contadores e cabeças de todos os bins |
+| ⬜ | Chunks `mmap` | Corromper `size`/flag `M` de chunks grandes |
+
+### Houses
+
+| | Tópico | O que é |
+|:-:|---|---|
+| ✅ | [House of Force](./heap/malloc-maleficarum/house-of-force.mdx) | `size` do top chunk gigante → `malloc` em qualquer endereço (glibc < 2.29) |
+| ⬜ | House of Spirit | `free` em chunk falso → o próximo `malloc` devolve região controlada |
+| ⬜ | House of Lore | Corromper o `bk` de um chunk na smallbin |
+| ⬜ | House of Einherjar | Off-by-null + `prev_size` falso → consolidação para trás e overlap |
+| ⬜ | House of Orange | Sem `free`: encolher o top chunk para ele ir à unsorted bin; + FSOP |
+| ⬜ | House of Botcake | Double free entre tcache e unsorted bin, contorna a tcache key |
+| ⬜ | House of Rabbit | Chunk falso na fastbin + `malloc_consolidate` |
+| ⬜ | House of Tangerine | House of Orange adaptado ao tcache (sem `free`) |
+| ⬜ | House of Water | Controle do tcache sem leak |
+| ⬜ | House of Muney | Corromper chunk `mmap` para remapear parte da libc e forjar símbolos |
+
+## FILE / FSOP
+
+| | Tópico | O que é |
+|:-:|---|---|
+| ⬜ | Estrutura `_IO_FILE` | Campos, buffers, `vtable`, `_IO_list_all` |
+| ⬜ | Leitura/escrita arbitrária via `FILE` | Leak por `stdout` (`_IO_write_base`), escrita por `stdin` (`_IO_buf_base`) |
+| ⬜ | Vtable hijack clássico | Vtable falsa (glibc ≤ 2.23) e `_IO_str_jumps` (2.24 a 2.27) |
+| ⬜ | FSOP moderno | House of Apple 1/2/3 (`_IO_wfile_jumps`, `_wide_data`), House of Emma (`_IO_cookie_jumps`), House of Kiwi (`__malloc_assert`) |
+| ⬜ | House of Husk | Tabelas de especificadores customizados do `printf` |
+| ⬜ | House of Banana | `link_map` falso em `_rtld_global` → `_dl_fini` |
+
+## Bugs de lógica e inteiros
+
+| | Tópico | O que é |
+|:-:|---|---|
+| ✅ | [Array Indexing (OOB)](./others/array-indexing.md) | Índice não validado → leitura/escrita relativa |
+| ✅ | [Integer Overflow](./others/integer-overflow.md) | Wraparound, signed × unsigned, truncamento |
+| ✅ | [Bad Seed](./others/bad-seed.md) | `rand()` previsível |
+| ✅ | [Z3 e execução simbólica](./others/z3.md) | Resolver restrições com Z3 e angr |
+| ⬜ | Type confusion | Objeto tratado como outro tipo (unions, tags controladas) |
+| ⬜ | Race conditions | TOCTOU, double fetch, corridas entre threads na heap |
+| ⬜ | Command injection em binários | `system`/`popen` com input parcialmente controlado |
+
+## Além do userland x86
+
+| | Tópico | O que é |
+|:-:|---|---|
+| ⬜ | Pwn em C++ | Vtables, `std::string`/`std::vector` na heap, UAF de objetos |
+| ⬜ | Outras arquiteturas | ROP em ARM/AArch64, MIPS, RISC-V; debug com QEMU e `gdb-multiarch` |
+| ⬜ | Kernel pwn (Linux) | Setup com QEMU, ret2usr, SMEP/SMAP/KPTI/KASLR, `modprobe_path`, `cred` |
+| ⬜ | Escape de sandbox | chroot, namespaces, `ptrace`, jails de Python/seccomp em desafios |
+| ⬜ | Outros alocadores | musl (`mallocng`), jemalloc, alocadores customizados de desafios |
+| ⬜ | Windows pwn | SEH, `HeapAlloc`, mitigações (CFG, ACG) |

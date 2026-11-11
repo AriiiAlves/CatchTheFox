@@ -6,13 +6,15 @@ Manual de **Engenharia Reversa e Pwning em Português**, construído com o intui
 
 O conteúdo vai do básico (assembly, stack, GDB, Ghidra, pwntools) até técnicas de exploração de binários usadas em CTFs (buffer overflow, format strings, ROP, heap e mais).
 
+O que já está escrito e o que ainda falta em pwning está na [Checklist de Pwning](https://ariiialves.github.io/CatchTheFox/pwning/checklist/) (arquivo `docs/pwning/checklist.mdx`).
+
 ## Estrutura do repositório
 
 ```
 docs/                     ← todos os artigos (.md ou .mdx)
 ├── intro.md              ← página inicial do site
 ├── introduction/         ← Introdução: assembly, endianness, Ghidra, GDB, IDA, pwntools
-├── pwning/               ← Pwning: proteções, stack, heap e outros
+├── pwning/               ← Pwning: checklist, proteções, stack, heap e outros
 ├── reversing/            ← Engenharia Reversa (em construção)
 ├── fast-food/            ← versão resumida, direto ao ponto
 ├── writeups/             ← resoluções de desafios
@@ -21,6 +23,7 @@ static/
 ├── docs-img/             ← imagens usadas nos artigos
 ├── bins/                 ← binários de exemplo
 └── challs/               ← arquivos de desafios (writeups)
+src/components/diagrams/  ← componentes de diagrama (<Mem>, <Chain>, <Flow>, <Side>)
 docusaurus.config.js      ← configuração do site (SEO, redirects, navbar...)
 sidebars.js               ← sidebar (gerada automaticamente, não precisa editar)
 ```
@@ -57,6 +60,7 @@ Encontre o arquivo pelo caminho da URL (veja acima), edite e abra um Pull Reques
    - `sidebar_position`: posição do artigo dentro da categoria (números menores aparecem primeiro).
    - Opcional: `unlisted: true` para a página existir sem aparecer na sidebar, ou `draft: true` para ela só aparecer rodando localmente (bom para artigos em construção).
 3. Pronto! A sidebar é gerada automaticamente, **não é preciso editar o `sidebars.js`**.
+4. Se o artigo é de pwning, atualize a linha dele em `docs/pwning/checklist.mdx` (troque ⬜ por ✅ e coloque o link).
 
 ### Criando uma nova categoria (pasta)
 
@@ -77,6 +81,34 @@ Encontre o arquivo pelo caminho da URL (veja acima), edite e abra um Pull Reques
 - Coloque imagens em `static/docs-img/` e use caminho absoluto: `![Descrição](/docs-img/minha-imagem.png)`.
 - Arquivos para download (desafios, binários) ficam em `static/` (ex: `static/challs/`). Para linkar, use o prefixo `pathname://`: `[Baixar](pathname:///challs/desafio.zip)`. Sem esse prefixo, o Docusaurus trata o arquivo como uma página, e o download quebra.
 - Para linkar outro artigo, use o caminho relativo do arquivo (ex: `[Format Strings](../stack/format-strings.md)`). Assim, o build avisa se o link quebrar.
+
+### Diagramas
+
+Para desenhar memória (stack frames, chunks, payloads), listas e fluxos, use os componentes de `src/components/diagrams/` em vez de arte ASCII. Eles geram SVG, acompanham o tema claro/escuro e funcionam em qualquer `.md`/`.mdx` sem `import`:
+
+```mdx
+<Mem
+  title="Stack frame"
+  top="endereços baixos"
+  bottom="endereços altos"
+  rows={[
+    {addr: 'rbp-0x20', label: 'buffer', kind: 'data', h: 2, note: 'início do input'},
+    {addr: 'rbp', label: 'rbp salvo', kind: 'meta'},
+    {addr: 'rbp+0x8', label: 'return address', kind: 'danger'},
+  ]}
+/>
+
+<Chain steps={[
+  {label: 'free(a)', nodes: ['a']},
+  {label: 'free(b)', nodes: ['b', 'a']},
+]} />
+```
+
+- `<Mem>`: células empilhadas. Cada linha aceita `addr`, `label`, `kind`, `note`, `h` (altura) ou `cells` (várias células lado a lado). `{gap: true}` desenha reticências.
+- `<Chain>`: listas encadeadas passo a passo (`head`, `tail`, `double` para setas duplas).
+- `<Flow>`: caixas (`nodes`, posicionadas em uma grade por `x`/`y`) e setas (`edges`).
+- `<Side>`: coloca diagramas lado a lado.
+- Cores (`kind`): `neutral`, `meta`, `data`, `ptr`, `ctrl`, `danger`, `free`.
 
 ### Movendo ou renomeando um artigo
 

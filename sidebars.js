@@ -15,7 +15,7 @@
  *  - Artigos com `unlisted: true` não aparecem na sidebar (mas a página existe).
  *    Artigos com `draft: true` só aparecem rodando localmente (`npm start`).
  *
- * Veja o CONTRIBUTING.md para o passo a passo completo.
+ * Veja o README.md para o passo a passo completo.
  *
  * @type {import('@docusaurus/plugin-content-docs').SidebarsConfig}
  */

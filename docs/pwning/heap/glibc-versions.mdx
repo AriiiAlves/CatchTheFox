@@ -3,82 +3,83 @@ title: Resumo de ataques por versão da glibc
 sidebar_position: 9
 ---
 
-Em ataques à stack é mais fácil identificar o que pode ser feito, pois basta usar `pwn checksec ./file` e sabemos o que é ou não possível: as proteções (NX, Canary, PIE, RELRO) são propriedades do binário, visíveis de fora. Já as proteções da heap não estão no binário: são verificações dentro do código do `malloc`/`free` da `glibc`, e mudam de versão para versão. Se entendermos o que cada versão da glibc carrega, podemos guiar melhor o ataque a ser feito.
+As proteções da stack são propriedades do binário e aparecem no `checksec`. As da heap são verificações dentro do `malloc`/`free` da glibc, e mudam de versão para versão. **Em heap, a primeira pergunta é sempre: qual é a glibc?**
 
-Para identificar a versão da libc de um binário:
+## Descobrindo a versão
 
 ```bash
-ldd ./binario | grep libc          # qual libc o binário usa localmente
-/lib/x86_64-linux-gnu/libc.so.6    # executar a libc imprime a versão dela
-strings libc.so.6 | grep "GNU C Library"   # para uma libc fornecida pelo desafio
+./libc.so.6                                   # executar a libc imprime a versão
+strings libc.so.6 | grep "GNU C Library"
+ldd ./chall                                   # qual libc o binário usa na sua máquina
 ```
 
-Em CTFs, a libc do servidor costuma vir junto com o desafio. Use o [pwninit](https://github.com/io12/pwninit) ou o `patchelf` para rodar o binário localmente com essa libc (e o `ld` correspondente), senão os offsets não vão bater.
+Referência rápida: Ubuntu 16.04 = 2.23, 18.04 = 2.27, 20.04 = 2.31, 22.04 = 2.35, 24.04 = 2.39. Distribuições aplicam patches por conta própria (a 2.27 do Ubuntu 18.04 recebeu a tcache key depois), então o comportamento pode diferir um pouco da versão "pura". Se o desafio só fornece um `Dockerfile`, a imagem base indica a versão (e a libc pode ser copiada de dentro do container).
 
----
+## Rodando com a libc do desafio
 
-## **Heap Overflow**
-- **Todas as versões**: O conceito básico de overflow continua válido, mas mitigações modernas dificultam a exploração
-- **glibc ≥ 2.3.4**: [Metadata Integrity Checks](./double-free.mdx#size-check-malloc). Overflow precisa manter consistência dos dados (size, prev_size, flags)
+O binário precisa rodar localmente com a **mesma** libc do servidor, ou offsets e comportamento do alocador não vão bater. A libc precisa do `ld.so` da mesma versão.
 
-## **Use After Free (UAF)**
-- **Todas as versões** - Vulnerabilidade de lógica, não da implementação do heap
-- Exploração facilitada em versões mais antigas sem safe-linking
+```bash
+pwninit                       # na pasta com o binário e a libc: baixa o ld, aplica patchelf e gera um solve.py
 
-## **Double Free**
-- **Fastbin (todas as versões modernas)**: só a verificação [fasttop](./double-free.mdx#fasttop-double-free-check) (o chunk liberado não pode ser o que está no topo da bin), contornada liberando outro chunk no meio
-- **glibc 2.26-2.28**: tcache **sem nenhuma verificação** de double free: `free(a); free(a);` funciona direto
-- **glibc ≥ 2.29**: [tcache key](./tcache.mdx#tcache-keys-glibc-229) detecta double free no tcache. Contorno: sobrescrever a `key` (UAF) antes do segundo `free`
-- **glibc ≥ 2.32**: Safe-linking dificulta usar o `fd` corrompido (precisa de leak da heap), mas não impede
+# ou manualmente:
+patchelf --set-interpreter ./ld-linux-x86-64.so.2 --set-rpath . ./chall
+```
 
-## **Unlink Attack**
-- **glibc < 2.3.4**: [Unlink clássico](./unlink.mdx) sem verificações
-- **glibc ≥ 2.3.4**: Requer [bypass das verificações](./unlink.mdx#proteção-safe-unlinking-glibc-234) (P->fd->bk == P && P->bk->fd == P)
-- **glibc ≥ 2.26**: [Tcache introduzida](./tcache.mdx), unlink menos relevante para chunks pequenos
-- **Prático até ~2.31**: Após isso, outras técnicas são preferíveis
+O [pwninit](https://github.com/io12/pwninit) também baixa os símbolos de debug da libc, o que faz os comandos `heap` e `bins` do pwndbg funcionarem.
 
-## **Tcache Poisoning**
-- **glibc < 2.26**: Tcache não existe
-- **glibc 2.26-2.31**: Extremamente fácil (sem checks no `fd`)
-- **glibc ≥ 2.32**: Safe-linking XOR no fd pointer (ainda explorável com leak da heap) + verificação de alinhamento (o alvo precisa ser múltiplo de 16)
-- **glibc ≥ 2.34**: sem `__malloc_hook`/`__free_hook`, então o alvo da escrita muda (ex: `environ` para vazar a stack e depois o return address, ou estruturas de `FILE`/`stdout`)
+## Linha do tempo das mitigações
 
-## **Libc Leak via Tcache**
-- **glibc ≥ 2.26**: Possível quando tcache está cheia (chunks vão para unsorted bin)
-- Técnica válida em **todas as versões com tcache**
+| glibc | Ano | Mudança | Efeito |
+|---|---|---|---|
+| 2.3.4 | 2004 | [Safe unlinking](./unlink.mdx#proteção-safe-unlinking-glibc-234); checagem de `size` na fastbin; [fasttop](./double-free.mdx#fasttop-double-free-check) | Fim do unlink clássico |
+| 2.26 | 2017 | [Tcache](./tcache.mdx), sem verificações. Alinhamento de 16 bytes também em 32 bits | Ataques mais fáceis que antes |
+| 2.29 | 2019 | [Tcache key](./tcache.mdx#tcache-keys-glibc-229); [checagem do `size` do top chunk](./malloc-maleficarum/house-of-force.mdx#top-chunk-integrity-check); verificações na unsorted bin e de `prev_size` na consolidação | Fim do House of Force e do *unsorted bin attack*; double free no tcache exige bypass |
+| 2.30 | 2019 | O tcache passa a decidir pelo contador (`counts`) | Poisoning precisa de contador > 0 |
+| 2.32 | 2020 | [Safe Linking](./safe-linking.mdx) e verificação de alinhamento | Poisoning exige leak da heap; alvo múltiplo de 16 |
+| 2.34 | 2021 | Remoção de `__malloc_hook`, `__free_hook`, `__realloc_hook`. Tcache key aleatória | Some o alvo padrão de escrita; a key deixa de vazar a heap |
+| 2.35+ | 2022 | Endurecimento gradual das estruturas `FILE` | FSOP continua possível por `_IO_wfile_jumps` |
+| 2.39 | 2024 | libc compilada com Full RELRO | A GOT da própria libc deixa de ser alvo |
 
-## **House of Force (Malloc Maleficarum)**
-- **glibc < 2.29**: Sem proteções
-- **glibc ≥ 2.29**: [Top Chunk Integrity Check](./malloc-maleficarum/house-of-force.mdx#top-chunk-integrity-check)
-- **glibc ≥ 2.32**: Safe-linking, dificulta obter leaks necessários.
+## O que funciona em cada versão
 
-## **House of Spirit**
-- **glibc < 2.32**: Relativamente fácil
-- **glibc ≥ 2.32**: Safe-linking adiciona complexidade
+| Técnica | < 2.26 | 2.26 a 2.28 | 2.29 a 2.31 | 2.32 a 2.33 | ≥ 2.34 |
+|---|:-:|:-:|:-:|:-:|:-:|
+| [Heap Overflow](./heap-overflow.mdx) / [UAF](./uaf.mdx) (o bug em si) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| [Leak de libc pela unsorted bin](./malloc-consolidate.mdx) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| [Fastbin dup](./double-free.mdx) | ✅ | ✅ (tcache cheio) | ✅ (tcache cheio) | 🟡 + leak da heap | 🟡 + leak da heap |
+| [Tcache Poisoning](./tcache.mdx#tcache-poisoning) | não existe | ✅ trivial | ✅ | 🟡 + leak da heap | 🟡 + leak da heap |
+| Double free direto no tcache | não existe | ✅ | 🟡 bypass da key | 🟡 | 🟡 |
+| [Unsafe unlink](./unlink.mdx) | ✅ | ✅ (fora do tcache) | ✅ | ✅ | ✅ |
+| [House of Force](./malloc-maleficarum/house-of-force.mdx) | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Unsorted bin attack | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Largebin attack | ✅ | ✅ | ✅ (variante mais restrita a partir da 2.30) | ✅ | ✅ |
+| Escrita em `__free_hook` / `__malloc_hook` | ✅ | ✅ | ✅ | ✅ | ❌ |
 
-## **House of Lore**
-- **glibc < 2.26**: Viável em small bins
-- **glibc ≥ 2.26**: Tcache interfere, precisa preencher tcache primeiro
+✅ funciona, 🟡 funciona com um requisito a mais, ❌ mitigado.
 
-## **House of Einherjar**
-- **glibc < 2.26**: Viável
-- **glibc ≥ 2.26**: Mais difícil devido a tcache e checks
----
+Para o código exato de cada técnica em cada versão, o [how2heap](https://github.com/shellphish/how2heap) organiza os exemplos em pastas por glibc.
 
-## **Marcos Importantes de Mitigação**
+## O que sobrescrever
 
-- **glibc 2.3.4 (2004)**: [Unlink hardening](./unlink.mdx#proteção-safe-unlinking-glibc-234), [Metadata Integrity Checks](./double-free.mdx#size-check-malloc) e a verificação [fasttop](./double-free.mdx#fasttop-double-free-check) na fastbin
-- **glibc 2.26 (2017)**: Introdução da [tcache](./tcache.mdx) (mudança massiva, e sem nenhuma verificação no início). `MALLOC_ALIGNMENT` passa a ser 16 também em 32 bits
-- **glibc 2.28 (2018)**: Verificações no `unsorted bin` (`malloc(): unsorted double linked list corrupted`), que matam o *unsorted bin attack* clássico
-- **glibc 2.29 (2019)**: [Tcache key](./tcache.mdx#tcache-keys-glibc-229) (detecção de double free no tcache) e [Top Chunk Integrity Check](./malloc-maleficarum/house-of-force.mdx#top-chunk-integrity-check)
-- **glibc 2.32 (2020)**: **Safe-linking** (XOR encoding em fd pointers) e verificação de alinhamento nos chunks do tcache/fastbin
-- **glibc 2.34 (2021)**: Remoção dos malloc hooks (`__malloc_hook`, `__free_hook`, `__realloc_hook`), que eram o alvo padrão de escrita arbitrária. A `tcache key` passa a ser aleatória
-- **glibc 2.35+ (2022)**: Começa o endurecimento das estruturas `FILE` (vtables validadas, ponteiros `_wide_data` protegidos), mas os ataques a `stdout`/`FILE` ainda são o caminho mais comum depois dos hooks
+Uma escrita arbitrária só vira shell se atingir algo que o programa usa para decidir o fluxo. Os alvos mudam conforme a versão:
 
-## **Resumo Prático**
+| Alvo | Condição | Como vira execução |
+|---|---|---|
+| `__free_hook` | glibc < 2.34 | Escreva `system`; depois `free` de um chunk cujo conteúdo é `/bin/sh` |
+| `__malloc_hook` | glibc < 2.34 | Escreva um *one_gadget*; dispare com qualquer `malloc` |
+| GOT do binário | Sem Full RELRO; base do binário conhecida | [GOT Overwrite](../stack/got-overwrite.md): `free`/`atoi`/`puts` → `system` |
+| GOT da libc | glibc < 2.39 | Funções como `puts` chamam `strlen` pela GOT da própria libc |
+| Return address na stack | Leak da stack | Leia `environ` (variável da libc que aponta para a stack), calcule o endereço de retorno e escreva uma [ROP chain](../stack/rop/index.mdx) |
+| Estruturas `FILE` (`stdout`, `_IO_list_all`) | Leak da libc (e, em geral, da heap) | FSOP: forjar um `FILE` cuja vtable leva a `system`. É o caminho "sem stack" nas glibc ≥ 2.34 |
+| `exit` handlers, `tls_dtor_list` | Leak ou sobrescrita do *pointer guard* | Ponteiros de função chamados em `exit` |
+| Ponteiros de função e vtables do programa | Depende do desafio | Direto |
 
-**Versões antigas (< 2.26)**: Praticamente **todos os ataques clássicos funcionam**
+Nas glibc atuais (≥ 2.34), o roteiro mais comum é: leak da heap → leak da libc → tcache poisoning em `environ` para vazar a stack → tcache poisoning no endereço de retorno → ROP.
 
-**Versões médias (2.26-2.31)**: [Tcache poisoning](./tcache.mdx#tcache-poisoning) lidera, ataques clássicos requerem adaptação
+## Resumo
 
-**Versões modernas (≥ 2.32)**: Safe-linking requer leaks de heap, mas exploits ainda são possíveis. Sem os hooks (≥ 2.34), os alvos usuais da escrita arbitrária são: `environ` (vazar a stack) seguido de ROP no return address, a struct `_IO_FILE` do `stdout` (leak e execução via vtable/`_IO_wfile_jumps`), ou a GOT da própria libc
+- **< 2.26**: tudo funciona. Fastbin dup em `__malloc_hook`, unsorted bin attack, House of Force.
+- **2.26 a 2.31**: tcache poisoning resolve quase tudo. Alvo: `__free_hook`.
+- **≥ 2.32**: o mesmo, mas com leak da heap para o Safe Linking e alvo alinhado.
+- **≥ 2.34**: sem hooks. `environ` + ROP, ou FSOP.

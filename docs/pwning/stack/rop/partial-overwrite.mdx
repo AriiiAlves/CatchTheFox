@@ -3,57 +3,70 @@ title: Partial Overwrite
 sidebar_position: 1
 ---
 
-Sistemas modernos têm ASLR, todos os endereços de memória são randomizados toda vez que o programa roda. Assim, não sabemos para onde apontar para fazer os ROPs!
+Com PIE/ASLR não sabemos os endereços absolutos, mas a stack (e a heap, e a GOT) já está cheia de ponteiros válidos. Em vez de escrever um endereço inteiro, o Partial Overwrite **altera só os bytes menos significativos de um ponteiro que já existe**, fazendo-o apontar para outro lugar próximo, na mesma região. Nenhum leak é necessário.
 
-A solução para isso é fazer o Partial Overwrite. 
+## Por que funciona
 
-Os endereços de memória como `0x7ffd4a3b12e0` são compostos de:
+O ASLR randomiza a base de cada região em múltiplos de uma página (`0x1000`). Logo, os **12 bits baixos** (3 dígitos hexadecimais) de qualquer endereço são fixos: dependem só do offset dentro do arquivo. Os bits mais altos também são previsíveis (em x86-64, um binário PIE cai sempre em `0x55…`/`0x56…`), mas isso não ajuda: o overflow escreve a partir do byte baixo, e para chegar aos bytes altos teria que passar por cima dos aleatórios.
 
-- Bytes mais significativos: `0x7ffd4a3b ` - Randomizado pelo ASLR!
-- Bytes menos significativos: `0x12e0` - Muitas vezes previsível ou com variação limitada
+<Mem
+  title="O mesmo endereço em três execuções: só os bits do meio mudam"
+  cellW={460}
+  rows={[
+    {addr: 'execução 1', cells: [{label: '0x00005', kind: 'neutral', w: 2.2}, {label: '5d4c3a2f', kind: 'danger', w: 3.4}, {label: '1da', kind: 'ctrl', w: 1.4}]},
+    {addr: 'execução 2', cells: [{label: '0x00005', kind: 'neutral', w: 2.2}, {label: '62b18e04', kind: 'danger', w: 3.4}, {label: '1da', kind: 'ctrl', w: 1.4}]},
+    {addr: 'execução 3', cells: [{label: '0x00005', kind: 'neutral', w: 2.2}, {label: '581f07b9', kind: 'danger', w: 3.4}, {label: '1da', kind: 'ctrl', w: 1.4}]},
+    {addr: '', cells: [{label: 'fixo (userspace)', kind: 'free', w: 2.2}, {label: 'aleatório (ASLR)', kind: 'free', w: 3.4}, {label: 'fixo (offset)', kind: 'free', w: 1.4}]},
+  ]}
+/>
 
-O ASLR randomiza a base de cada região (binário, libc, stack...) em múltiplos de uma **página** (4096 bytes = `0x1000`). Isso significa que **os 12 bits menos significativos (os 3 últimos dígitos hexadecimais) de qualquer endereço nunca mudam**: eles são o offset dentro da página, e dependem só do binário.
+Como a memória é little endian, um overflow atinge primeiro o byte **menos** significativo do ponteiro. Parando de escrever no meio dele, os bytes altos (os aleatórios) ficam intactos.
 
-```
-Mesmo programa, execuções diferentes:
+| Bytes sobrescritos | Bits desconhecidos | Chance de acerto |
+|---|---|---|
+| 1 | 0 | 100%, desde que o alvo esteja na mesma faixa de `0x100` bytes |
+| 2 | 4 (um dígito hex) | 1 em 16 |
+| 3 | 12 | 1 em 4096 |
 
-Execução 1: 0x7f8a1b451[200]  ← ASLR muda ESTA parte
-Execução 2: 0x7f4c2d896[200]  ← ASLR muda ESTA parte
-Execução 3: 0x7e9b3fa2f[200]  ← ASLR muda ESTA parte
-                         ↑
-               Estes 3 dígitos SEMPRE ficam iguais
-```
-
-Na prática: sobrescrever **1 byte** (os 2 últimos dígitos) do endereço funciona sempre. Sobrescrever **2 bytes** (4 dígitos) deixa 1 dígito (4 bits) aleatório, então o exploit funciona 1 vez a cada 16 tentativas, o que é perfeitamente aceitável em CTF (basta repetir).
-
-Imagine o programa inteiro como uma caixa. Você pode sempre mudar a caixa de lugar em um galpão, mas todas as partículas do papelão estarão à uma mesma distância umas das outras, certo?
-
-No partial overwrite, não sabemos os bytes mais significativos, mas **sabemos o offset relativo dado ao endereço desejado**. Assim:
-
-1. Temos um endereço legítimo na pilha `0x7f8a1b451200` que aponta para dentro de um módulo (libc, etc)
-2. Não sabemos que o endereço é `0x7f8a1b451200`, mas ele está lá.
-3. Não modificamos os bytes mais significativos (`0x7f8a1b45`), pois não sabemos quais são. Modificamos apenas os bytes menos significativos (`0x1200 → 0x1250`), pois:
-    - Conhece-se o layout do módulo (distância dos gadgets, ou offset, em relação à aquele endereço)
-    - Sabe-se que os gadgets estão em `+0x50`, `+0x80`, etc., do endereço atual (USAMOS ISSO!)
-
-O Partial Overwrite funciona:
-- Quando você não sabe o endereço absoluto (randomizado pelo ASLR) do gadget
-- Se você tem um endereço válido na pilha que possa ser manipulado
-- Se você sabe o layout relativo do módulo (**onde os gadgets estão em relação ao endereço atual**)
-- Se você sabe que os offsets relativos são consistentes (gadget sempre estará a `+0x50` bytes)
-
-Assim, a tática é **reutilizar um endereço já existente na pilha** e **obter todos os gadgets a partir do endereço relativo dos gadgets em relação a ele**.
+Uma chance em 16 é aceitável em CTF: basta rodar o exploit em laço.
 
 ## Exemplo
 
-Suponha um binário com PIE em que o `return address` da função vulnerável aponta para `main+0x5a`, cujo endereço real termina em `...1da`. Queremos chamar `win`, que fica em `...1f6` (mesma página, mesmo prefixo). Em vez de sobrescrever os 8 bytes do `return address`, sobrescrevemos **só o último byte**:
+Binário com PIE. O endereço de retorno da função vulnerável aponta para `main+0x5a`, que termina em `...1da`. A função `win` fica em `...1f6`, na mesma página. Trocamos só o último byte:
 
 ```py
-payload = b'A' * offset   # padding até o return address
-payload += b'\xf6'        # troca só o byte 0xda por 0xf6. Os outros 7 bytes ficam intactos
-p.send(payload)           # send, e não sendline: o \n sobrescreveria o próximo byte!
+payload  = b'A' * offset     # padding até o return address
+payload += b'\xf6'           # 0x...1da → 0x...1f6. Os outros 7 bytes não são tocados
+p.send(payload)              # send, não sendline: o \n seria escrito no byte seguinte
 ```
 
-Isso exige que o input seja lido por algo que não adicione nada no fim (`read` em vez de `gets`/`fgets`, que colocariam `\n` ou `\0`). Se a função alvo estiver em outra página, mas a menos de `0x10000` bytes, sobrescreva 2 bytes com `p16(0x?f6)` e tente 16 vezes (o `?` é o dígito aleatório).
+Se `win` estivesse em outra página (`...2f6`), seriam 2 bytes, com um dígito no chute:
 
-O mesmo raciocínio vale para a heap (sobrescrever o último byte de um ponteiro `fd` para apontar para outro chunk próximo) e para ponteiros da libc guardados na stack ou na GOT.
+```py
+for nibble in range(16):                    # tenta os 16 valores possíveis do dígito aleatório
+    guess = (nibble << 12) | 0x2f6          # 0x02f6, 0x12f6, ..., 0xf2f6
+    p = process('./vuln')
+    p.send(b'A' * offset + p16(guess))
+    try:
+        p.sendline(b'echo ok')
+        if b'ok' in p.recvuntil(b'ok', timeout=1):
+            p.interactive()
+            break
+    except EOFError:
+        pass
+    p.close()
+```
+
+Se o alvo for um servidor que faz `fork` sem re-executar (o layout é o mesmo em toda conexão), um dos 16 chutes acerta com certeza. Se cada `process` re-randomiza o PIE, o laço acima ainda funciona, mas vale embrulhá-lo num `while True`: cada tentativa tem 1/16 de chance independente das anteriores.
+
+## Requisitos e limitações
+
+- **A leitura não pode acrescentar bytes**. `read` grava exatamente o que você envia. `gets`, `fgets` e `scanf("%s")` gravam um `\0` depois do input, e `strcpy` também: esse `\0` cai no byte seguinte do ponteiro. Às vezes isso é aproveitável (o byte nulo vira parte do endereço), mas normalmente estraga.
+- **O alvo precisa estar na mesma região** do ponteiro original. Um return address que aponta para o binário só alcança o binário; para alcançar a libc, parta de um ponteiro da libc (o retorno da `main` para `__libc_start_call_main`, por exemplo, permite alcançar um *one_gadget* próximo).
+- Em 64 bits, só um endereço pode ser parcialmente sobrescrito por overflow: tudo antes dele é reescrito por inteiro. Por isso o uso típico é "um salto só".
+
+## Outros usos
+
+- **Heap**: trocar o byte baixo de um `fd` para apontar para outro chunk próximo, sem leak da heap (em glibc ≥ 2.32, o [Safe Linking](../../heap/safe-linking.mdx) atrapalha).
+- **GOT**: trocar os bytes baixos de uma entrada já resolvida para outra função próxima na libc.
+- **Leak**: sobrescrever o byte baixo de um ponteiro que o programa imprime depois, fazendo-o apontar para um dado mais interessante.

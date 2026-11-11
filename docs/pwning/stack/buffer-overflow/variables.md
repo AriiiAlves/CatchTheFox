@@ -3,21 +3,22 @@ title: "Buffer Overflow - Variáveis"
 sidebar_position: 1
 ---
 
-Como vimos, podemos sobrescrever variáveis com buffer overflow. Mas como podemos fazer isso?
+O uso mais simples de um Buffer Overflow é alterar uma variável local que fica **depois do buffer** na stack (em um endereço maior, mais perto do `rbp`). Não envolve endereço de retorno, então Canary, PIE e NX não atrapalham.
 
-1. Verifique informações do arquivo com `file arquivo`
-2. Abra o programa no Ghidra ou Debugger
-3. Verifique se a variável que queremos sobrescrever está **entre a variável do input e o `rbp` na stack**
-4. Se estiver, podemos sobrescrever. **Calcule a distância para chegar no início da variável desejada, e sobrescreva com caracteres quaisquer**.
-   1. Basicamente, teremos nosso input como `rbp-0x10`, por exemplo, e a outra variável em `rbp-0x5`. Isso quer dizer que a distância entre eles é `0x10 - 0x5 = 0xb = 11`. Ou seja, para chegarmos no **início** de `rbp-0x5`, precisamos sobrescrever a stack com 11 bytes quaisquer.
-   2. Geralmente, usamos caracteres, pois cada caractere = 1 byte e fica fácil de contabilizar.
-5. Ao final da string, **coloque o que você deseja que seja sobrescrito na variável**.
+## Passo a Passo
 
-**Atenção**: Você precisa respeitar a quantidade de espaço de cada variável. Se a variável possui 4 bytes e você sobrescrever apenas 3, um byte será lixo de memória, e vai interferir no valor da variável.
+1. Ache o buffer e a variável alvo no Ghidra ou no disassembly. Ex: buffer em `rbp-0x30`, alvo em `rbp-0x1c`.
+2. Confira se o alvo está em um endereço **maior** que o do buffer e se a leitura chega até ele. **Se o alvo fica antes do buffer, o overflow não o alcança**.
+3. O padding é a **diferença** entre os dois: `0x30 - 0x1c = 0x14` bytes.
+4. Payload: `padding + novo valor`, com o valor empacotado no **tamanho da variável** (`p32` para `int`, `p64` para `long`/ponteiro, `p8` para `char`).
 
-**Curiosidade**: Às vezes você não possui um excedente necessário para fazer Buffer Overflow. Mas, em alguns casos, você pode usar BOF para **modificar a format string** que define o limite de leitura do input. Isso só é possível se a format string estiver na stack (na maioria dos casos ela está em uma região de dados separada, onde há apenas dados constantes, que não são variáveis).
+Cuidados:
 
-Abaixo, temos alguns binários que ficam para você como lição de casa. Tente resolvê-los e veja o solve caso tenha dificuldade. Os arquivos estão [aqui](https://github.com/guyinatuxedo/nightmare/tree/master/modules/04-bof_variable), no repositório do Nightmare.
+- O compilador pode reordenar as variáveis locais. A ordem na stack não é necessariamente a ordem de declaração no código: **confie no disassembly**.
+- Escrever menos bytes que o tamanho da variável deixa os bytes restantes com o valor antigo (ou lixo). Lembre-se de cuidar de todos os bytes.
+- `gets`, `fgets` e `scanf("%s")` acrescentam um `\0` no fim, que também é escrito na stack.
+
+Os binário e writeup abaixo é do [Nightmare](https://github.com/guyinatuxedo/nightmare/tree/master/modules/04-bof_variable).
 
 ## [CHALL] csaw18_boi
 
@@ -71,7 +72,7 @@ Vejamos a `main` do programa (`disass main` no GDB):
    0x00000000004006df <+158>:   ret
 ```
 
-Podemos ver que o programa verifica se a variável `rbp-0x1c` é igual a `0xcaf3baee` (sim, é um número inteiro expresso em hexadecimal), ou seja, um IF:
+Podemos ver que o programa verifica se a variável `rbp-0x1c` é igual a `0xcaf3baee` (sim, é um número inteiro expresso em hexadecimal), ou seja, um "`if`":
 
 ```
    0x00000000004006a5 <+100>:   mov    eax,DWORD PTR [rbp-0x1c]
@@ -104,7 +105,23 @@ Temos o input `rbp-0x30` e a variável que queremos sobrescrever em `rbp-0x1c`. 
 
 Note também que o programa tem Stack Canary (`mov rax, QWORD PTR fs:0x28` / `mov QWORD PTR [rbp-0x8], rax` no início, e a verificação com `__stack_chk_fail` no fim). Isso não atrapalha aqui: só escrevemos até `rbp-0x18`, e o Canary está em `rbp-0x8`.
 
-A distância entre o input e a variável é `0x30-0x1c = 0x14 = 20`. Portanto, precisamos encher 20 casas com caracteres e depois colocar o que queremos. Vamos fazer isso com pwntools, em python: 
+A distância entre o input e a variável é `0x30 - 0x1c = 0x14 = 20` bytes:
+
+<Mem
+  title="Frame da main do boi. O read escreve 0x18 bytes a partir de rbp-0x30"
+  top="endereços baixos"
+  bottom="endereços altos"
+  rows={[
+    {addr: 'rbp-0x30', label: 'buffer do read (0x14 bytes)', kind: 'ctrl', h: 2, note: '20 bytes de padding'},
+    {addr: 'rbp-0x1c', label: 'int = 0xdeadbeef', kind: 'danger', note: 'alvo: 4 bytes'},
+    {addr: 'rbp-0x18', label: 'outra variável', kind: 'neutral', note: 'o read para aqui'},
+    {gap: true},
+    {addr: 'rbp-0x8', label: 'canary', kind: 'meta', note: 'fora do alcance'},
+    {addr: 'rbp', label: 'rbp salvo', kind: 'meta'},
+  ]}
+/>
+
+Em pwntools:
 
 ```py
 # Importa pwntools

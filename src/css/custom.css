@@ -67,3 +67,72 @@ code:not(pre code) {
 [data-theme='light'] code {
   border: 1px solid #dadada !important;
 }
+
+/* ---------- Diagramas (src/components/diagrams) ---------- */
+:root {
+  --dg-bg: #ffffff;
+  --dg-stroke: #8a8f98;
+  --dg-neutral: rgba(127, 127, 127, 0.12);
+  --dg-meta: rgba(56, 139, 253, 0.2);
+  --dg-meta-s: #388bfd;
+  --dg-data: rgba(46, 160, 67, 0.2);
+  --dg-data-s: #2ea043;
+  --dg-ptr: rgba(163, 113, 247, 0.22);
+  --dg-ptr-s: #a371f7;
+  --dg-ctrl: rgba(233, 150, 56, 0.3);
+  --dg-ctrl-s: #e99638;
+  --dg-danger: rgba(248, 81, 73, 0.22);
+  --dg-danger-s: #f85149;
+  --dg-hl: #b4742a;
+}
+
+[data-theme='dark'] {
+  --dg-bg: #1b1b1d;
+  --dg-hl: #f19c3a;
+}
+
+figure.dg {
+  width: 100%;
+  margin: 1.25rem auto;
+  text-align: center;
+}
+
+figure.dg svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  font-family: var(--ifm-font-family-monospace);
+}
+
+figure.dg figcaption {
+  margin-top: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--ifm-color-emphasis-700);
+}
+
+.dg-side {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 2.5rem;
+  justify-content: center;
+  align-items: flex-start;
+}
+
+.dg-side figure.dg {
+  margin: 1rem 0;
+}
+
+.dg-t { fill: var(--ifm-font-color-base); }
+.dg-m { fill: var(--ifm-color-emphasis-700); }
+.dg-hl { fill: var(--dg-hl); font-weight: 600; }
+.dg-bg { fill: var(--dg-bg); }
+.dg-c { stroke-width: 1.2; }
+.dg-neutral { fill: var(--dg-neutral); stroke: var(--dg-stroke); }
+.dg-meta { fill: var(--dg-meta); stroke: var(--dg-meta-s); }
+.dg-data { fill: var(--dg-data); stroke: var(--dg-data-s); }
+.dg-ptr { fill: var(--dg-ptr); stroke: var(--dg-ptr-s); }
+.dg-ctrl { fill: var(--dg-ctrl); stroke: var(--dg-ctrl-s); }
+.dg-danger { fill: var(--dg-danger); stroke: var(--dg-danger-s); }
+.dg-free { fill: transparent; stroke: var(--dg-stroke); stroke-dasharray: 4 3; }
+.dg-line { fill: none; stroke: var(--ifm-color-emphasis-600); stroke-width: 1.4; }
+.dg-head { fill: var(--ifm-color-emphasis-600); }

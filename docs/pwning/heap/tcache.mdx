@@ -3,84 +3,136 @@ title: Tcache (e Tcache Keys)
 sidebar_position: 6
 ---
 
-A partir da [glibc 2.26](https://elixir.bootlin.com/glibc/glibc-2.26/source/malloc/malloc.c), um novo tipo de bin foi adicionado: o `tcache` (thread cache). Ele foi criado para substituir as `fastbins` e `smallbins`, que agora somente são usadas se o `tcache` estiver desabilitado, indisponível ou cheio. O `tcache` foi desenvolvido para melhorar a performance do malloc, e sua operação é simples: todo tamanho de chunk (até no máximo 0x410) possui seu próprio **tcache bin**, que pode armazenar no máximo 7 chunks. Se o tcache ficar cheio, o próximo chunk a ser adicionado vai ser tratado normalmente e vai para o `fastbin` ou `unsorted bin` (para ser realocado depois para `smallbin` e `largebin`).
+O tcache (*thread cache*) foi introduzido na [glibc 2.26](https://elixir.bootlin.com/glibc/glibc-2.26/source/malloc/malloc.c) como um cache por thread na frente de todas as outras bins. Foi feito para ser rápido, e por isso nasceu praticamente sem verificações: atacar o tcache é mais fácil que atacar as fastbins que ele substituiu. Em qualquer desafio com glibc ≥ 2.26, é o primeiro lugar para olhar.
 
-O `tcache` age como um `fastbin`: uma lista encadeada simples de chunks livres de um tamanho específico. A manipulação da lista, usando os ponteiros `fd`, é idêntica. Assim, os ataques ao `tcache` são similares aos ataques à `fastbin`.
+## Funcionamento
 
-É estranho que o `tcache` é mais vulnerável do que a `fastbin`, o que faz um ataque à `glibc 2.26` ser muito mais fácil do que um ataque à `glibc 2.25`.
+- Um bin para cada tamanho de chunk de `0x20` a `0x410` (64 bins em x86-64).
+- Cada bin guarda no máximo **7 chunks**. O oitavo `free` do mesmo tamanho segue o caminho antigo (fastbin ou unsorted bin).
+- Lista simplesmente encadeada, LIFO, como a fastbin.
+- O `malloc` consulta o tcache antes de qualquer outra bin, e o `free` tenta o tcache antes de qualquer outra bin.
 
-O `tcache` é guardado em uma struct na própria heap, a `tcache_perthread_struct` (é o primeiro chunk da heap, de tamanho `0x290`). Ela tem um contador de quantos chunks há em cada bin e um ponteiro para o primeiro chunk de cada bin. Em cada chunk livre, o campo `fd` (chamado de `next` no código do tcache) aponta para o próximo chunk do bin, exatamente como na fastbin. A diferença é que, no tcache, o `next` aponta para o **início dos dados** do próximo chunk (`user_data`), e não para o header.
+O estado fica na `tcache_perthread_struct`, alocada **na própria heap**: é o primeiro chunk (tamanho `0x290` em glibc ≥ 2.30, `0x250` antes).
+
+```c
+typedef struct tcache_entry {
+  struct tcache_entry *next;          // mesmo lugar do fd
+  uintptr_t key;                      // glibc >= 2.29
+} tcache_entry;
+
+typedef struct tcache_perthread_struct {
+  uint16_t counts[TCACHE_MAX_BINS];           // quantos chunks em cada bin
+  tcache_entry *entries[TCACHE_MAX_BINS];     // cabeça de cada bin
+} tcache_perthread_struct;
+```
+
+<Mem
+  title="Chunk dentro do tcache"
+  cellW={300}
+  rows={[
+    {addr: 'chunk', cells: [{label: 'prev_size', kind: 'meta'}, {label: 'size', kind: 'meta'}]},
+    {addr: 'mem', cells: [{label: 'next (fd)', kind: 'ptr'}, {label: 'key', kind: 'ptr'}], note: 'next aponta para o mem do próximo'},
+    {label: 'dados antigos', kind: 'free', h: 1.3},
+  ]}
+/>
+
+Diferenças em relação à fastbin que importam para exploração:
+
+| | Fastbin | Tcache |
+|---|---|---|
+| Para onde `fd`/`next` aponta | Header do próximo chunk | **Dados** do próximo chunk (`mem`) |
+| Verificação de `size` ao alocar | Sim | **Não** |
+| Detecção de double free | Só a cabeça da lista | Nenhuma (2.26 a 2.28), `key` (≥ 2.29) |
+| Contador | Não | `counts[]`: em glibc ≥ 2.30, bin com contador 0 é tratado como vazio |
 
 ## Tcache Poisoning
 
-Tcache Poisoning é **sobrescrever o ponteiro `next` (`fd`) de um chunk que está no tcache** com um endereço arbitrário. Como o tcache confia nesse ponteiro, o segundo `malloc` daquele tamanho vai retornar o endereço que escrevemos, e passamos a ter escrita (e leitura) arbitrária onde quisermos.
-
-É a mesma ideia do ataque de [Double Free](./double-free.mdx) na fastbin, mas aplicado ao `tcache`. O `fd` pode ser sobrescrito de várias formas:
-
-- **Use-After-Free**: o programa deixa editar um chunk já liberado (o caso mais comum)
-- **Heap Overflow**: um chunk vizinho escreve por cima do header e do `fd` do chunk liberado
-- **Double Free**: liberar o mesmo chunk duas vezes e alocar de novo para escrever no `fd`
+Tcache Poisoning é **sobrescrever o `next` de um chunk que está no tcache**. O tcache confia no ponteiro: depois que o chunk corrompido sai da lista, a alocação seguinte daquele tamanho devolve o endereço que escrevemos.
 
 ```c
 char *a = malloc(0x20);
 char *b = malloc(0x20);
 free(a);
-free(b);               // tcache[0x30]: b -> a
-// UAF: escrevemos no fd de b
-*(long *)b = target;   // tcache[0x30]: b -> target (em glibc >= 2.32, veja Safe Linking)
-malloc(0x20);          // retorna b
-char *evil = malloc(0x20);  // retorna target!
+free(b);                     // tcache[0x30]: b → a
+
+*(long *)b = alvo;           // UAF de escrita: tcache[0x30]: b → alvo
+                             // (glibc >= 2.32: escreva (b >> 12) ^ alvo)
+
+malloc(0x20);                // devolve b
+char *evil = malloc(0x20);   // devolve alvo
 ```
 
-Em glibc 2.26 a 2.28, não há **nenhuma** verificação. Em glibc ≥ 2.29, existe a `key` (abaixo) contra double free, e em glibc ≥ 2.32 o `fd` é ofuscado pelo [Safe Linking](./safe-linking.mdx), que exige um leak da heap. Em glibc ≥ 2.32 o endereço alvo também precisa estar alinhado em 16 bytes.
+<Chain
+  title="tcache[0x30] durante o poisoning"
+  head="entries"
+  steps={[
+    {label: 'free(a); free(b)', nodes: ['b', 'a']},
+    {label: '*b = alvo', nodes: ['b', {t: 'alvo', kind: 'ctrl'}], tail: '?'},
+    {label: 'malloc', nodes: [{t: 'alvo', kind: 'ctrl'}], tail: '?', note: 'devolve b'},
+    {label: 'malloc', nodes: [], tail: '?', note: 'devolve alvo'},
+  ]}
+/>
+
+Formas de alcançar o `next`:
+
+- **[Use-After-Free](./uaf.mdx) de escrita**: editar um chunk já liberado. É o caso mais comum.
+- **[Heap Overflow](./heap-overflow.mdx)**: transbordar de um chunk alocado para o vizinho que está no tcache.
+- **[Double Free](./double-free.mdx)**: o chunk fica alocado e na lista ao mesmo tempo.
+
+Por que liberar **dois** chunks no exemplo: em glibc ≥ 2.30, o `malloc` só usa o tcache se `counts[idx] > 0`. Com um único chunk liberado, o contador vai a zero quando ele sai, e o ponteiro envenenado nunca é usado. Liberar dois (ou mais) deixa o contador em 1 na hora certa.
+
+Requisitos por versão:
+
+| glibc | O que muda |
+|---|---|
+| 2.26 a 2.31 | `next` em claro, sem verificação. Qualquer endereço serve como alvo |
+| ≥ 2.32 | [Safe Linking](./safe-linking.mdx): escreva `(endereço_do_chunk >> 12) ^ alvo`, o que exige um leak da heap. O alvo precisa ser **múltiplo de 16** |
+| ≥ 2.34 | Sem `__malloc_hook`/`__free_hook`. Alvos usuais: veja [Ataques por versão](./glibc-versions.mdx#o-que-sobrescrever) |
+
+Um efeito colateral a lembrar: ao devolver um chunk, o tcache zera o campo `key` dele (glibc ≥ 2.29), ou seja, grava 8 bytes nulos em `alvo + 8`.
 
 ## Libc-Leak com Tcache
 
-Em [malloc consolidate](./malloc-consolidate.mdx), falamos um pouco sobre fazer um chunk cair propositalmente na `unsorted bin`, de modo que `fd` desse chunk aponta para a `libc`. Bom, nosso objetivo ao atacar o tcache será fazer o chunk cair na `unsorted bin`
+Chunks do tcache só contêm ponteiros para a heap. Para vazar a libc, precisamos de um chunk na **unsorted bin**, cujo `fd`/`bk` apontam para a `main_arena` (veja [Leak de libc pela unsorted bin](./malloc-consolidate.mdx)). Dois caminhos:
 
-Quando o `tcache` está cheio para um tamanho específico, o chunk liberado vai ser alocado para uma das bins. O limite máximo de chunk aceito pela fast bin é de `160 bytes`. Porém, a `glibc` limita o tamanho máximo para `128 bytes` usando a variável global `global_max_fast` por padrão (caso queira ler mais: [Open Euler - Glibc Malloc Source Code Analisis](https://www.openeuler.org/en/blog/wangshuo/Glibc_Malloc_Source_Code_Analysis_(1).html)). 
-
-Lembre-se que, em 64-bits, se damos `malloc(0x50)`, na verdade estamos alocando um chunk de `0x60` bytes (`0x50 + 0x8` de metadados, arredondado para múltiplo de 16). Bom, isso quer dizer que se dermos `free` em 8 chunks do **mesmo tamanho** cujo tamanho de chunk seja **maior** que `0x80` (ex: `malloc(0x80)`, que gera chunks de `0x90`), os 7 primeiros vão para o tcache e o oitavo irá parar na `unsorted bin`, e não na `fast bin`, por conta de seu tamanho. E se tivermos acesso ao ponteiro para o chunk mesmo depois do `free` (um Use-After-Free), BOOM! Ao ler o conteúdo desse ponteiro, ali estará `fd` apontando para um endereço dentro da `libc` (o `main_arena`).
-
-Dois cuidados:
-
-1. O oitavo chunk **não pode fazer fronteira com o top chunk**, senão ele é absorvido pelo top em vez de ir para a unsorted bin. Aloque um chunk a mais depois dele (uma "barreira") e não libere.
-2. Os 8 chunks precisam ter sido alocados antes de começar a liberar. Se você alocar e liberar um por um, o mesmo chunk fica entrando e saindo do tcache.
+**1. Encher o tcache.** Libere 8 chunks do mesmo tamanho, com chunk **maior que `0x80`** (acima do limite da fastbin). Os 7 primeiros vão para o tcache e o oitavo vai para a unsorted bin.
 
 ```c
 char *c[9];
-for (int i = 0; i < 9; i++) c[i] = malloc(0x80);  // c[8] é a barreira
-for (int i = 0; i < 8; i++) free(c[i]);           // c[0..6] -> tcache, c[7] -> unsorted bin
-printf("%p\n", *(void **)c[7]);                    // UAF: fd de c[7] = endereço dentro da libc
+for (int i = 0; i < 9; i++) c[i] = malloc(0x80);   // chunks de 0x90; c[8] é a barreira
+for (int i = 0; i < 7; i++) free(c[i]);            // enchem o tcache[0x90]
+free(c[7]);                                        // vai para a unsorted bin
+printf("%p\n", *(void **)c[7]);                    // UAF de leitura: endereço na libc
 ```
 
-Com o leak em mãos, `libc.address = leak - offset`, onde o offset é fixo para cada versão da libc (descubra uma vez no GDB: `leak - libc_base`, ou procure pelo símbolo `main_arena` com `libc.sym['main_arena'] + 96`).
+**2. Chunk grande.** Um chunk maior que `0x410` (ex: `malloc(0x420)`) não cabe no tcache e vai direto para a unsorted bin no primeiro `free`.
 
-Uma alternativa sem tcache: `malloc(0x500)` (tamanho large, acima do limite de `0x410` do tcache) e `free` direto, com uma barreira depois. Vai para a unsorted bin na primeira liberação.
+Nos dois casos:
+
+- O chunk não pode ser vizinho do top chunk, senão é absorvido por ele. Mantenha um chunk alocado depois (a **barreira**).
+- Aloque tudo antes de começar a liberar. Alocar e liberar um por um só faz o mesmo chunk entrar e sair do tcache.
+- Sem UAF de leitura, dá para alocar de novo por cima do chunk: o `malloc` não limpa a memória, então os ponteiros antigos continuam lá se o programa não os sobrescrever por inteiro.
+
+Com o leak: `libc.address = leak - offset`. O offset é constante para cada libc; meça uma vez no GDB (`leak - base`, com a base do `vmmap`).
 
 ## Tcache Keys (glibc 2.29)
 
-Tcache keys são um campo adicional nos chunks tcache para detectar double-free. Em glibc 2.29 a 2.33, é um ponteiro que aponta para a estrutura `tcache_perthread_struct` enquanto o chunk está na tcache. A partir da glibc 2.34, é um valor aleatório (`tcache_key`), gerado na inicialização, para não vazar o endereço da heap. O campo `key` fica logo após `fd` do chunk (nos 8 bytes seguintes dos dados do usuário).
+A partir da glibc 2.29, o `free` grava um valor no segundo campo do chunk (`key`, em `mem + 8`) ao colocá-lo no tcache, e o apaga quando o chunk sai.
 
-```c
-// Chunk na TCACHE (2.26 a 2.28)
-struct malloc_chunk {
-    size_t prev_size;
-    size_t size;
-    struct malloc_chunk *fd;  // next chunk na tcache
-    // resto vazio
-};
+| glibc | Valor da `key` |
+|---|---|
+| 2.29 a 2.33 | Endereço da `tcache_perthread_struct`. Ler a `key` de um chunk livre **vaza a heap** |
+| ≥ 2.34 | Valor aleatório por processo (`tcache_key`) |
 
-// Chunk na TCACHE (>= 2.29)
-struct malloc_chunk {
-    size_t prev_size;
-    size_t size;
-    struct malloc_chunk *fd;   // next chunk na tcache
-    uintptr_t key;             // ← NOVO! tcache_perthread_struct (2.29-2.33) ou valor aleatório (>= 2.34)
-    // resto vazio
-};
-```
+Em cada `free`, se `chunk->key` for igual ao valor esperado, a glibc percorre o bin procurando o chunk. Se encontrar, aborta com `free(): double free detected in tcache 2`.
 
-Ao dar `free`, o `tcache_put` grava a `key` no chunk. Em um `free` seguinte, se a `key` do chunk já for igual à chave, o glibc percorre o bin procurando o chunk e, se achar, aborta com `free(): double free detected in tcache 2`.
+**Contornos**
 
-Contorno: como a verificação só olha a `key`, basta **sobrescrever a `key`** (os bytes 8 a 15 dos dados do chunk) com qualquer outra coisa antes do segundo `free`, o que é trivial com um UAF que permita escrever. Na prática, com UAF de escrita, o double free continua fácil; sem ele, prefira o Tcache Poisoning direto (sobrescrever o `fd`), que não depende de double free.
+- **Sobrescrever a `key`**: a verificação só é disparada se a `key` bater. Com um UAF de escrita, altere qualquer byte de `mem + 8` e o segundo `free` passa.
+- **Mudar o tamanho**: se der para corromper o `size` do chunk entre os dois `free`, o segundo vai para outro bin e a busca não o encontra.
+- **House of Botcake**: libere o chunk uma vez para a unsorted bin (com o tcache cheio) e outra para o tcache (depois de abrir uma vaga). As duas listas não se conhecem.
+- **Não usar double free**: com UAF de escrita, o Tcache Poisoning direto não depende de nada disso.
+
+## Atacando a `tcache_perthread_struct`
+
+Como a struct fica na heap, ela mesma é um alvo. Quem consegue escrever nela (por um poisoning apontado para o início da heap, por exemplo) controla `counts` e `entries` de **todos** os bins: cada `entries[i]` passa a ser um `malloc` em endereço arbitrário, sem mais nenhuma corrupção. Marcar um contador como 7 também faz o próximo `free` daquele tamanho ir direto para a unsorted bin.

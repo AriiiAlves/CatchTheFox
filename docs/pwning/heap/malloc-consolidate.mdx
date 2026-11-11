@@ -1,178 +1,128 @@
 ---
-title: Vazando libc com malloc_consolidate (Todo)
+title: Leak de libc pela unsorted bin
 sidebar_position: 5
 ---
 
-O fastbin não se consolida automaticamente, apenas quando a função `malloc_consolidate()` é chamada. A função pode parecer complicada, mas seu papel é percorrer todos os chunks nas fastbins, **unir aqueles que são adjacentes na memória** para formar chunks maiores e, em seguida, **inserir esses chunks consolidados na unsorted bin**.
+Chunks no tcache e nas fastbins só têm o ponteiro `fd`, que aponta para outro chunk: lê-los vaza no máximo a **heap**. Para vazar a **libc** pela heap, o caminho padrão é a **unsorted bin**: os ponteiros `fd` e `bk` de um chunk que está nela apontam para dentro da `main_arena`, uma variável global da libc.
 
-Um Read-After-Free (leitura após `free`) em um chunk na fastbin **pode vazar o endereço da heap, mas não da libc**. Pois as listas de fastbins são simplesmente encadeadas usando apenas o ponteiro `fd`, que aponta para outro chunk livre na heap ou é NULL.
+Receita: (1) fazer um chunk ir para a unsorted bin, (2) ler os primeiros 8 bytes dos dados dele.
 
-**Para obter um vazamento da libc, precisamos acessar ponteiros da unsorted bin, que é uma lista duplamente encadeada**. Isso pois quando há só um chunk na `unsorted bin`, seu ponteiros `fd/bk` apontam para a `libc` (que está dentro do `main_arena`). `main_arena` é uma variável global da libc que contém todo o estado do alocador. Vou explicar com mais detalhes adiante.
+## Por que o chunk aponta para a libc
 
-O segredo para vazar a libc será ativar `malloc_consolidate()` para levar um chunk da fastbin para a unsorted bin e acessar seu `fd/bk` que apontam para a libc.
-
-## main_arena e unsorted bin
-
-Observemos a struct `malloc_state` (`main_arena` é uma instância dessa struct):
+A `main_arena` é a struct que guarda o estado do alocador, incluindo as cabeças de todas as bins:
 
 ```c
-struct malloc_state {  // main_arena é uma INSTÂNCIA disso
-    mutex_t mutex;
+struct malloc_state {
+    __libc_lock_define (, mutex);
     int flags;
-    
-    // Várias "bins" (listas) de chunks livres
-    mfastbinptr fastbinsY[NFASTBINS];  // Fastbins
-    mchunkptr top;                     // Top chunk
+    int have_fastchunks;
+    mfastbinptr fastbinsY[NFASTBINS];
+    mchunkptr top;                      // top chunk
     mchunkptr last_remainder;
-    
-    // Bins normais (unsorted, small, large)
-    mchunkptr bins[NBINS * 2 - 2];    // <--- IMPORTANTE!
-    // ...
+    mchunkptr bins[NBINS * 2 - 2];      // unsorted, small e large bins
+    ...
 };
 ```
 
-Cada bin ocupa DOIS SLOTS no array `bins`:
+Unsorted, small e large bins são listas duplas **circulares**. Cada uma ocupa dois slots de `bins[]` (um `fd` e um `bk`), e a glibc trata esse par como se fosse um chunk: a "cabeça" da lista. Para a unsorted bin, a cabeça é o par `bins[0]`/`bins[1]`.
+
+Sendo circular, o último elemento aponta de volta para a cabeça. Com **um único chunk** na lista, ele é ao mesmo tempo o primeiro e o último:
+
+<Flow
+  title="Unsorted bin com um chunk: fd e bk do chunk apontam para a main_arena"
+  cw={420}
+  nw={240}
+  nodes={[
+    {id: 'arena', x: 0, y: 0.25, t: 'main_arena', sub: 'libc (0x7f...)', kind: 'ptr'},
+    {id: 'chunk', x: 1, y: 0.25, t: 'chunk livre', sub: 'heap (0x55...)', kind: 'data'},
+  ]}
+  edges={[
+    {from: 'arena', to: 'chunk', label: 'bins[0], bins[1]', bend: -30},
+    {from: 'chunk', to: 'arena', label: 'fd, bk', bend: -30, hl: true},
+  ]}
+/>
 
 ```
-Índices no array bins[]:
-[0] = fd do unsorted bin    (aponta para primeiro chunk)
-[1] = bk do unsorted bin    (aponta para último chunk)
-
-[2] = fd do smallbin[1]     (chunks de ~32 bytes)
-[3] = bk do smallbin[1]
-
-[4] = fd do smallbin[2]     (chunks de ~48 bytes)  
-[5] = bk do smallbin[2]
-...
+pwndbg> x/4gx 0x55555555a000
+0x55555555a000: 0x0000000000000000      0x0000000000000091     ← prev_size, size
+0x55555555a010: 0x00007ffff7dd1b78      0x00007ffff7dd1b78     ← fd, bk: o mesmo endereço da libc
 ```
 
-E lembre-se que `mchunkptr` é uma ponteiro para um chunk:
+`fd == bk` com um valor `0x7f...` é a assinatura de um chunk sozinho na unsorted bin.
+
+O valor vazado é o endereço da "cabeça" vista como chunk, `&main_arena.bins[0] - 0x10`, que coincide com `&main_arena.top`. Em x86-64 isso é **`main_arena + 96`** nas glibc ≥ 2.27 (`+ 88` nas anteriores).
+
+```py
+libc.address = leak - (libc.sym['main_arena'] + 96)
+```
+
+Se a libc não exporta o símbolo `main_arena`, meça o offset uma vez no GDB: `leak - base_da_libc`, com a base tirada do `vmmap`. Ele é constante para aquela libc. Outra referência: `main_arena` fica `0x10` bytes depois de `__malloc_hook` nas glibc que ainda o têm.
+
+Com mais chunks na lista, só o primeiro e o último apontam para a arena (um pelo `bk`, outro pelo `fd`); os do meio apontam para vizinhos na heap. Um chunk que já foi movido para uma small ou large bin também aponta para a `main_arena`, em um offset diferente. Chunks em large bin ainda têm `fd_nextsize`/`bk_nextsize`, que apontam para a **heap**: um único chunk dá os dois leaks.
+
+## Levando um chunk até a unsorted bin
+
+O chunk precisa (a) não caber no tcache nem em fastbin e (b) não ser vizinho do top chunk, senão é absorvido por ele. Mantenha sempre um chunk alocado depois dele, a **barreira**.
+
+| Método | Como | Quando usar |
+|---|---|---|
+| Chunk grande | `malloc(0x420)` ou mais, e `free` | O programa permite tamanhos > `0x410` |
+| Encher o tcache | 8 `free` de chunks entre `0x90` e `0x410`: o oitavo vai para a unsorted bin | Tamanho limitado, mas várias alocações ([detalhes](./tcache.mdx#libc-leak-com-tcache)) |
+| glibc < 2.26 | Qualquer chunk maior que `0x80` | Sem tcache |
+| `malloc_consolidate` | Fundir chunks das fastbins (abaixo) | Só é possível alocar tamanhos de fastbin |
+| Corromper `size` | Aumentar o `size` de um chunk pequeno para > `0x410` antes do `free` | Há overflow, mas só alocações pequenas. O "próximo chunk" calculado pelo novo `size` precisa parecer válido |
 
 ```c
-struct malloc_chunk {
-
-  INTERNAL_SIZE_T      mchunk_prev_size;  /* Size of previous chunk (if free).  */
-  INTERNAL_SIZE_T      mchunk_size;       /* Size in bytes, including overhead. */
-
-  struct malloc_chunk* fd;         /* double links -- used only if free. */
-  struct malloc_chunk* bk;
-
-  /* Only used for large blocks: pointer to next larger size.  */
-  struct malloc_chunk* fd_nextsize; /* double links -- used only if free. */
-  struct malloc_chunk* bk_nextsize;
-};
-
-typedef struct malloc_chunk* mchunkptr // PONTEIRO para chunk;
+char *a = malloc(0x420);
+char *barreira = malloc(0x10);
+free(a);                              // unsorted bin
+printf("%p\n", *(void **)a);          // leak (UAF de leitura)
 ```
 
-Os bins ficam em `main_arena.bins`. O array `bins` guarda os ponteiros para o primeiro/último chunk de cada bin/lista.
+## Lendo os ponteiros
 
-Bom, tomemos a unsorted bin. É uma lista duplamente encadeada (`fd` e `bk`), certo? Em uma **lista encadeada circular**, o **último elemento aponta para o primeiro**. Na implementação da `libc`, o HEAD possui dois ponteiros: um que aponta para o **primeiro** chunk e outro que aponta para o último (por que o HEAD aponta para os dois? Para fins de otimização).
+- **[UAF](./uaf.mdx) de leitura**: imprimir o chunk depois de liberado.
+- **Realocar sem limpar**: o `malloc` não zera a memória. Alocar um chunk do mesmo tamanho (ou menor, cortado desse chunk) e imprimir mostra o `fd`/`bk` antigos, desde que o programa não os sobrescreva. Se a leitura do programa exige ao menos 1 byte, envie só 1: os 12 bits baixos do endereço são conhecidos e os outros bytes permanecem.
+- **Chunks sobrepostos**: ler o chunk livre através de outro chunk que o cobre.
 
-```
-NAVEGANDO POR fd
-HEAD -> a -> b -> c -> HEAD
+## `malloc_consolidate`
 
-NAVEGANDO POR bk
-HEAD -> c -> b -> a -> HEAD
+Chunks em fastbin não são fundidos com os vizinhos no `free`. Isso só acontece quando `malloc_consolidate()` roda: ela esvazia todas as fastbins, funde cada chunk com os vizinhos livres e coloca o resultado na **unsorted bin**. É a saída quando o programa só permite alocações pequenas.
 
-Assim: 
+Gatilhos:
 
-HEAD.fd = Primeiro
-HEAD.bk = Último
-```
+- Um pedido de tamanho de **large bin** (≥ `0x400`), mesmo que não venha do nosso `malloc` direto.
+- O top chunk não ter espaço para o pedido.
+- `free` de um chunk que, depois de consolidado, passa de 64 KB (`FASTBIN_CONSOLIDATION_THRESHOLD`).
 
-`main_arena.bins[0]` é um ponteiro para o primeiro chunk ("fd" do HEAD) e `main_arena.bins[1]` é um ponteiro para o último chunk (bk do HEAD):
+Quando o programa não deixa pedir tamanhos grandes, use alocações **internas da libc**:
 
-```
-main_arena.bins[0] (HEAD da unsorted bin):
-    - É um PONTEIRO DUPLO (armazena dois valores)
-    - bins[0] = fd do HEAD (aponta para primeiro chunk)
-    - bins[1] = bk do HEAD (aponta para último chunk)
-```
+- `scanf` com entrada longa (da ordem de `0x400` caracteres ou mais): o buffer interno cresce na heap.
+- `printf` com largura enorme (`%10000c`), em uma format string.
+- `stdin`/`stdout` sem `setvbuf`: o buffer do `FILE` (`0x1000` em pipes/sockets, `0x400` em terminal) é alocado no primeiro uso.
 
-O truque da `libc` é tratar o HEAD como se fosse um chunk: `bins[0]` e `bins[1]` são lidos como se fossem os campos `fd` e `bk` de um "chunk falso" que começa 16 bytes antes, em `&bins[0] - 0x10` (já que, em um chunk de verdade, `fd` fica no offset `0x10`). Esse endereço (`&bins[0] - 0x10`, dentro da `main_arena`) é o que os chunks da lista usam para apontar "de volta para o HEAD".
+Em glibc ≥ 2.26, os chunks pequenos vão primeiro para o tcache: encha-o (7 por tamanho) para os próximos caírem na fastbin.
 
-Quando a unsorted bin está **VAZIA**, o HEAD aponta para si mesmo:
+## Consolidação no `free`
 
-```
-bins[0] (fd do HEAD) = &bins[0] - 0x10   ← o "chunk falso" aponta para SI MESMO
-bins[1] (bk do HEAD) = &bins[0] - 0x10
-```
-
-Quando a unsorted bin possui **UM chunk**, o HEAD aponta para o chunk nos dois sentidos, e o chunk aponta de volta para o HEAD nos dois sentidos:
-
-```
-Memória da libc (main_arena):
-bins[0] (fd do HEAD) → CHUNK
-bins[1] (bk do HEAD) → CHUNK
-
-Memória da heap (CHUNK):
-chunk->fd → &bins[0] - 0x10 (na libc)
-chunk->bk → &bins[0] - 0x10 (na libc)   ← o MESMO endereço do fd
-
-Círculo completo:
-HEAD → CHUNK → HEAD
-```
-
-E aqui está O VAZAMENTO QUE QUERÍAMOS! **Com UM CHUNK, `fd` e `bk` desse mesmo chunk apontam para dentro da libc, e para o mesmo endereço!** (Essa igualdade é um bom sinal de que você está olhando para o chunk certo)
-
-```
-main_arena na LIBC (&bins[0] = 0x7ffff7dd1b10):
-┌─────────────────────────────┐
-│ bins[0] (fd): 0x55555555a000│← aponta para CHUNK (header)
-│ bins[1] (bk): 0x55555555a000│← aponta para CHUNK (header)
-└─────────────────────────────┘
-                     
-CHUNK na HEAP (header em 0x55555555a000, dados em 0x55555555a010):
-┌─────────────────────────────┐
-│ prev_size | size            │
-│ fd: 0x7ffff7dd1b00          │← aponta para LIBC! (&bins[0] - 0x10)
-│ bk: 0x7ffff7dd1b00          │← aponta para LIBC! (o mesmo endereço)
-│ ... resto dos dados ...     │
-└─────────────────────────────┘
-```
-
-Esse endereço vazado é `&main_arena + 96` (o offset do `top` + `bins` dentro da struct, em 64 bits). A `main_arena` é um símbolo da libc, então `libc_base = leak - (libc.sym['main_arena'] + 96)`. Se o pwntools não achar o símbolo `main_arena` (ele é interno), descubra o offset uma vez no GDB: `leak - libc_base`, com a base obtida em `vmmap` ou `info proc mappings`.
-
-## Ativando malloc_conosolidate
-
-Se **liberarmos chunks adjacentes na fastbin** e **ativarmos uma chamada a `malloc_consolidate()`, eles serão consolidados e formarão um chunk maior que será movido para a unsorted bin**. Se o chunk movido for o único elemento da lista, **ambos `fd` e `bk` apontarão para uma localização dentro da estrutura `malloc_state`, que reside na memória da libc**.
-
-Portanto, o essencial é **saber como ativar a consolidação do fastbin**. Alguns gatilhos comuns incluem:
-
-- Fornecer uma entrada muito grande para funções como `scanf` (por exemplo, algo em torno de `0x400` caracteres ou mais). Isso funciona porque a implementação interna do `scanf` em algumas libc usa um `scratch_buffer` alocado na heap para entradas grandes. Se a entrada exceder certo tamanho, o código pode acionar `malloc` ou `realloc`, o que por sua vez pode levar à chamada de `malloc_consolidate` para lidar com fragmentação e otimizar a alocação de grandes blocos.
-
-- Usar uma string de formato como `%10000c` em uma vulnerabilidade de format string também pode desencadear a alocação de um buffer grande, já que a função `printf` precisa alocar espaço para a saída expandida, potencialmente ativando `malloc_consolidate` indiretamente.
-
-Ambos os métodos funcionam porque alocações que caem na categoria de largebin (ou que exigem manipulação especial de blocos grandes) frequentemente invocam `malloc_consolidate` para fundir blocos livres e reduzir a fragmentação antes de atender a uma requisição grande. Ao inspecionar o código-fonte do `malloc.c` na glibc, é possível identificar outros gatilhos específicos, como chamadas a `malloc` com tamanhos muito grandes, uso de `realloc` em certas condições, ou até mesmo a liberação massiva de memória em situações de pressão de heap.
-
-## Consolidação automática no free() comum
-
-Vimos só sobre fastbin, mas a consolidação acontece SEMPRE ao liberar chunks small/large:
+Chunks fora do tcache e das fastbins são fundidos com os vizinhos livres **no próprio `free`**:
 
 ```c
-char *a = malloc(0x100);  // Small chunk (não fastbin!)
-char *b = malloc(0x100);
-char *c = malloc(0x100);
+char *a = malloc(0x420);
+char *b = malloc(0x420);
+char *c = malloc(0x420);
+char *barreira = malloc(0x10);
 
-free(a);  // Já vai para unsorted bin
-free(c);  // Já vai para unsorted bin
-
-free(b);  // CONSOLIDA AUTOMATICAMENTE com 'a' e 'c'!
-// Resultado: um chunk de ~0x300 na unsorted bin
+free(a);      // unsorted bin
+free(c);      // unsorted bin
+free(b);      // funde com a e com c: um único chunk de 0xc90 na unsorted bin
 ```
 
-Para o exemplo acima funcionar, é preciso que `c` não seja vizinho do top chunk, senão `free(c)` o consolida com o top em vez de mandá-lo para a unsorted bin. Na prática, aloque uma "barreira" depois (`char *barreira = malloc(0x100);`) e não a libere. O mesmo vale para o chunk que você quer que fique sozinho na unsorted bin: ele não pode encostar no top.
-
-Em glibc ≥ 2.26, lembre-se também do [tcache](./tcache.mdx): chunks de até `0x410` vão primeiro para ele (7 por tamanho), e só depois para as fastbins/unsorted bin. Então ou use tamanhos maiores que `0x410`, ou preencha o tcache antes.
+Isso importa por dois motivos. Primeiro, os ponteiros antigos (`b`, `c`) passam a apontar para o **meio** de um chunk livre maior, o que é a base das técnicas de chunks sobrepostos. Segundo, a fusão para trás confia nos campos `prev_size` e no bit `P`: forjá-los com um overflow é o que os ataques de [Unlink](./unlink.mdx), *poison null byte* e House of Einherjar exploram.
 
 ## Resumo
 
-1. Chunks na fastbin → só vazam endereços da heap
-2. Chunks na unsorted bin → vazam endereços da libc
-3. Para mover chunks da fastbin para unsorted bin → chame `malloc_consolidate()` (consolida chunks na fastbin e move para unsorted bin)
-4. Para chamar `malloc_consolidate()` → use funções que alocam muito de uma só vez (scanf/printf grandes)
-5. Vaze `fd` ou `bk` do chunk que agora está na unsorted bin com UAF (lendo o chunk liberado) ou alocando um chunk em cima dele sem limpar os dados (o `malloc` não zera o conteúdo, então um `malloc` do mesmo tamanho seguido de um `print` mostra o `fd` antigo, desde que o programa não sobrescreva esses 16 bytes primeiro).
-
-Em glibc ≥ 2.26, o jeito mais simples de levar um chunk à unsorted bin é encher o tcache: veja [Libc-Leak com Tcache](./tcache.mdx#libc-leak-com-tcache).
+1. Tcache/fastbin: leak de **heap**. Unsorted/small/large bin: leak de **libc**.
+2. Leve um chunk à unsorted bin (chunk grande, tcache cheio ou `malloc_consolidate`), com uma barreira antes do top chunk.
+3. Leia `fd` ou `bk` e subtraia o offset: `libc.address = leak - (main_arena + 96)`.
+4. Confira: a base tem que terminar em `000`.

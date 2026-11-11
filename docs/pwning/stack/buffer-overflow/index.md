@@ -3,156 +3,119 @@ title: "Introdução ao Buffer Overflow"
 sidebar_position: 2
 ---
 
-Buffer Overflow é a arte de **usar inputs para sobrescrever memória**. Todos os programas, em geral, esperam uma entrada para produzir uma resposta, certo?
+Buffer Overflow (BOF), consiste em escrever mais bytes em um buffer do que ele consegue comportar. Em C nada verifica esse limite: os bytes excedentes simplesmente sobrescrevem o que vem depois na memória. 
 
-Por exemplo:
+Quando o buffer é uma variável local (ou seja, fica na stack), o que vem depois é o resto do stack frame: outras variáveis, o `rbp` salvo e o endereço de retorno.
 
-```C
+```c
 int main(){
     char nome[5];
 
-    scanf("%s", nome);
+    scanf("%s", nome);          // lê sem limite de tamanho
     printf("Você digitou: %s", nome);
 }
 ```
-Acima, temos um array de caracteres que suporta 5 elementos: 4 caracteres e um `\0` (na memória, é apenas um 00) no final, que indica que é o fim da string.
 
-Simples, não? O programa irá funcionar com o seu input:
+## O stack frame na memória
 
-```
-< John
-> Você digitou: John
-```
+Vejamos o início da `main` do código dado anteriormente com `disass main`:
 
-Vamos dar um `disass main` no pwndbg:
-
-```
-0x0000555555555149 <+0>:     push   rbp
-   0x000055555555514a <+1>:     mov    rbp,rsp
-=> 0x000055555555514d <+4>:     sub    rsp,0x10
-   0x0000555555555151 <+8>:     lea    rax,[rbp-0x5]
-   0x0000555555555155 <+12>:    mov    rsi,rax
-   ...
+```nasm
+push   rbp
+mov    rbp,rsp
+sub    rsp,0x10
+lea    rax,[rbp-0x5]     ; endereço de nome
+mov    rsi,rax           ; 2º argumento do scanf
 ```
 
-Esse é o início da função `main`. Note que é subtraído `0x10` do `rsp`, o que quer dizer que a stack terá 16 bytes (0x10 = 16) para variáveis.
+A instrução `sub rsp, 0x10` reserva 16 bytes para variáveis locais, e `nome` começa em `rbp-0x5`. O frame fica assim:
 
-Depois, a instrução `lea` carrega o endereço de `rbp-0x5` no `rax`. O `rax` é só uma variável temporária, que passa o seu valor para `rsi`, que por sua vez é o registrador utilizado como primeiro parâmetro de uma função. Isso tudo é o preparo para chamar a função `scanf`, que usa o endereço guardado no `rsi` para atribuir o input do usuário.
+<Mem
+  title="Stack frame da main. O scanf escreve a partir de rbp-0x5, em direção aos endereços altos"
+  top="endereços baixos"
+  bottom="endereços altos"
+  rows={[
+    {addr: 'rbp-0x10', label: '(não usado)', kind: 'neutral', h: 1.4, note: 'rsp'},
+    {addr: 'rbp-0x5', label: 'nome[5]', kind: 'data', note: 'início do input'},
+    {addr: 'rbp', label: 'rbp salvo', kind: 'meta', note: '5 bytes depois do início'},
+    {addr: 'rbp+0x8', label: 'return address', kind: 'danger', note: '13 bytes depois do início'},
+    {addr: 'rbp+0x10', label: 'frame de quem chamou a main', kind: 'neutral'},
+  ]}
+/>
 
-Opa! Nossa variável não tinha tamanho 5? Vemos um `rbp-0x5` aqui. Exatamente, as coisas são bem intuitivas. Acabamos de ver memória ser alocada na stack para receber uma string com 4 caracteres + byte nulo.
-
-Se analisarmos no pwndbg, após darmos o input `John` temos na stack:
-
-```
-─────────────────────────────────────────────────────[ STACK ]──────────────────────────────────────────────────────
-00:0000│ rsp 0x7fffffffdd40 ◂— 0
-01:0008│-008 0x7fffffffdd48 ◂— 0x6e686f4affdde0
-02:0010│ rbp 0x7fffffffdd50 ◂— 1
-03:0018│+008 0x7fffffffdd58 —▸ 0x7ffff7ddfca8 (__libc_start_call_main+120) ◂— mov edi, eax
-04:0020│+010 0x7fffffffdd60 —▸ 0x7fffffffde50 —▸ 0x7fffffffde58 ◂— 0x38 /* '8' */
-05:0028│+018 0x7fffffffdd68 —▸ 0x555555555149 (main) ◂— push rbp
-06:0030│+020 0x7fffffffdd70 ◂— 0x155554040
-07:0038│+028 0x7fffffffdd78 —▸ 0x7fffffffde68 —▸ 0x7fffffffe148 ◂— '/mnt/c/Users/Ariel/Desktop/Manual-de-Engenharia-Reversa-Ganesh/test'
-```
-
-Vemos que só há um valor na stack entre o `rbp` e `rsp`. Se analisarmos esse valor:
-
-```
-0x6e686f4affdde0 = 
-  6e 68 6f 4a ff dd e0
-  n  h  o  J  [lixo de memória]
-```
-
-Na memória está sequencial, como veremos já já. Porém o GDB transforma isso em little endian (byte menos significativo primeiro), ou seja, inverte os bytes e mostra em um único hexadecimal.
-
-O lixo de memória aparece justamente porque porque o GDB está mostrando o conteúdo bruto da memória no endereço que você examinou, não interpretando como string. Na verdade, ele está analisando 8 bytes de memória, que é o padrão. Porém, nossa variável ocupa apenas 5 bytes. Então sobram 3 bytes mesmo.
-
-E dando `hexdump $rsp` para ver o binário da região da stack a partir do `rsp`, temos:
+Com o input `John`, cabe tudo no buffer (`hexdump $rsp` no pwndbg):
 
 ```
 +0000 0x7fffffffdd40  00 00 00 00 00 00 00 00  e0 dd ff 4a 6f 68 6e 00  │........│...John.│
 +0010 0x7fffffffdd50  01 00 00 00 00 00 00 00  a8 fc dd f7 ff 7f 00 00  │........│........│
-+0020 0x7fffffffdd60  50 de ff ff ff 7f 00 00  49 51 55 55 55 55 00 00  │P.......│IQUUUU..│
-+0030 0x7fffffffdd70  40 40 55 55 01 00 00 00  68 de ff ff ff 7f 00 00  │@@UU....│h.......│
 ```
 
-Na memória, as coisas estão alinhadas. Note que temos 4a 6f 68 6e 00. O último caractere é o null terminator (indica fim da string).
+Vemos que `4a 6f 68 6e 00` é `John\0`, terminando exatamente no último byte antes de `rbp` (`0x7fffffffdd50`). Na linha seguinte estão o `rbp` salvo (`1`) e o endereço de retorno (`0x7ffff7ddfca8`, dentro da libc).
 
-Agora, vem uma questão. A variável suporta apenas 4 caracteres. O que ocorre se digitarmos 5?
+:::note Lendo a stack no pwndbg
+A seção `STACK` mostra a memória em palavras (words) de 8 bytes, já interpretadas como inteiros little endian. A palavra em `0x7fffffffdd48` aparece como sendo `0x6e686f4affdde0`: os bytes `e0 dd ff` são lixo que já estava lá, seguidos de `4a 6f 68 6e` (`John`) e do `00`. Para ver byte a byte, na ordem da memória, use `hexdump`.
+:::
+
+## Estourando o Buffer
+
+Com `James` (5 letras), o `\0` do final já cai fora da variável, em cima do primeiro byte do `rbp` salvo:
 
 ```
-< James
-> Você digitou: James
-```
-
-Dando `hexdump $rsp`, temos:
-
-```
- hexdump $rsp
 +0000 0x7fffffffdd40  00 00 00 00 00 00 00 00  e0 dd ff 4a 61 6d 65 73  │........│...James│
 +0010 0x7fffffffdd50  00 00 00 00 00 00 00 00  a8 fc dd f7 ff 7f 00 00  │........│........│
-+0020 0x7fffffffdd60  50 de ff ff ff 7f 00 00  49 51 55 55 55 55 00 00  │P.......│IQUUUU..│
-+0030 0x7fffffffdd70  40 40 55 55 01 00 00 00  68 de ff ff ff 7f 00 00  │@@UU....│h.......│
 ```
 
-Veja, o `scanf` sobrescreveu a memória sem problemas. Mas agora o `\0` não está mais lá. Por sorte, os próximos bytes são `00`. Portanto, **o printf vai continuar lendo a string, mesmo que ela tenha passado o limite máximo, pois ele depende de encontrar o \0 ou 00 para terminar**. Isso é uma falha de segurança, pois permite vazar endereços de memória em um programa ao qual não temos acesso ao binário (cenas dos próximos capítulos).
-
-E se decidirmos colocar uma string gigante?
+Com 53 letras `A`:
 
 ```
-< AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-> Você digitou: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-```
-
-Olhe só nossa stack agora:
-
-```
-─────────────────────────────────────────────────────[ STACK ]──────────────────────────────────────────────────────
-00:0000│ rsp 0x7fffffffdd40 ◂— 0
-01:0008│-008 0x7fffffffdd48 ◂— 0x4141414141ffdde0
-02:0010│ rbp 0x7fffffffdd50 ◂— 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
-... ↓        5 skipped
-```
-
-Perceba que o endereço de `rbp` foi sobrescrito com um monte de A's. E se dermos um `hexdump $rsp`:
-
-```
-hexdump $rsp
-
 +0000 0x7fffffffdd40  00 00 00 00 00 00 00 00  e0 dd ff 41 41 41 41 41  │........│...AAAAA│
 +0010 0x7fffffffdd50  41 41 41 41 41 41 41 41  41 41 41 41 41 41 41 41  │AAAAAAAA│AAAAAAAA│
 ... ↓            skipped 1 identical lines (16 bytes)
 +0030 0x7fffffffdd70  41 41 41 41 41 41 41 41  41 41 41 41 41 41 41 41  │AAAAAAAA│AAAAAAAA│
 ```
 
-Basicamente, acabamos de sobrescrever `0x7fffffffdd80 - 0x7fffffffdd4b = 0x35 = 53 (decimal)` bytes (`0x7fffffffdd4b` é o endereço do primeiro `41`, ou seja, o início da nossa variável, e `0x7fffffffdd80` é o primeiro endereço depois do último `41`, onde ficou o `\0`)! E olha só, digitamos A 53 vezes.
-
-Okay, isso significa que podemos **alterar o que quisermos na stack, desde a variável que permite o buffer overflow até depois do `rbp`**.
-
-E o que acontece se tentarmos continuar o programa? Bom, não há outras variáveis no programa, então nada foi sobrescrito. Mas `rbp` e o `return address` (`rbp+0x8` em `x64`) foram sobrescritos. Quando a função `main` terminar, ela vai tentar voltar a algum endereço que estava guardado no `return address`, mas que se perdeu, pois sobrescrevemos ele com `0x4141414141414141`. Porém, ainda assim, esse endereço vai tentar ser acessado. No fim do código em assembly, vemos:
+Repare que o `rbp` salvo e endereço de retorno foram sobrescritos. Quando a `main` executa o `ret`, ele tenta pular para o endereço de retorno sobrescrito:
 
 ```
-──────────────────────────────────────────────[ DISASM / x86-64 / set emulate on ]─────────────────────────────────
-   0x55555555517a <main+49>    mov    rdi, rax               RDI => 0x555555556007 ◂— 0x696420aac3636f56
-   0x55555555517d <main+52>    mov    eax, 0                 EAX => 0
-   0x555555555182 <main+57>    call   printf@plt                  <printf@plt>
-
-   0x555555555187 <main+62>    mov    eax, 0                 EAX => 0
-   0x55555555518c <main+67>    leave
  ► 0x55555555518d <main+68>    ret                                <0x4141414141414141>
-```
-
-Viu que a instrução `ret` tem o endereço `0x4141414141414141`? Se prosseguirmos com a execução do programa....
-
-```
-pwndbg> c
-Continuing.
 
 Program received signal SIGSEGV, Segmentation fault.
 ```
 
-**Segmentation fault**! Por quê? Pois o endereço `0x4141414141414141` não está mapeado na memória do processo (não pertence a nenhuma região válida: código, stack, heap ou bibliotecas). Em x86-64, ele nem sequer é um endereço "canônico" (os endereços de usuário válidos vão só até `0x00007fffffffffff`), então o processador recusa o acesso e o kernel mata o programa com `SIGSEGV`.
+`0x4141414141414141` não é um endereço mapeado (em x86-64 nem é canônico: endereços de usuário vão até `0x00007fffffffffff`), então o processo morre com `SIGSEGV`. O crash em si não interessa. O que interessa é que **o valor que foi para o `rip` saiu do nosso input**. Trocando os `A` certos por um endereço válido, escolhemos para onde o programa vai.
 
-O ponto principal do Buffer Overflow é que, **para um dado input, precisamos que o código leia mais caracteres do que a variável pode aguentar**. Se no código há um limite de caracteres respeitado corretamente (como `fgets(buf, sizeof(buf), stdin)` ou `read(0, buf, sizeof(buf))`), isso faz com que Buffer Overflow **não seja uma técnica possível**, e precisamos explorar outras possibilidades.
+## O que é possível fazer com Buffer Overflow 
 
-Funções que costumam permitir Buffer Overflow: `gets` (sem limite nenhum), `scanf("%s")` (sem limite), `strcpy`/`strcat` (copiam até o `\0`), `sprintf`, e `read`/`fgets`/`memcpy` quando o tamanho passado é maior do que o buffer.
+Vimos que Buffer Overflow consiste em sobrescrever a Stack. E o que podemos fazer com isso? 
+
+| Alvo | Resultado | Página |
+|---|---|---|
+| Variáveis locais depois do buffer | Mudar o comportamento do programa (flags, tamanhos, ponteiros) | [BOF - Variáveis](./variables.md) |
+| Endereço de retorno | Pular para uma função existente | [BOF - Return Address](./return-address.md) |
+| Endereço de retorno, com stack executável | Executar código injetado | [BOF - Shellcode](./shellcode.md) |
+| Endereço de retorno e o que vem depois | Encadear trechos de código existentes | [ROP](../rop/index.mdx) |
+
+O que atrapalha: 
+
+- [Stack Canary](../../protections.mdx#stack-canaryssp-stack-smashing-protector) (detecta a sobrescrita do endereço de retorno)
+- PIE/ASLR (você precisa saber para onde pular) e NX (não dá para executar a stack).
+
+## Onde ocorre a vulnerabilidade
+
+O overflow existe quando a **função de leitura ou cópia aceita mais bytes do que o destino comporta**:
+
+| Função | Problema |
+|---|---|
+| `gets(buf)` | Sem limite nenhum. Para só no `\n` |
+| `scanf("%s", buf)` | Sem limite. Para em espaço, tab ou `\n` |
+| `strcpy`, `strcat`, `sprintf` | Copiam até o `\0` da origem |
+| `read(0, buf, n)`, `fgets(buf, n, f)`, `memcpy(dst, src, n)` | Vulneráveis quando `n > buffer` |
+| Laços manuais (`while ((c = getchar()) != '\n') buf[i++] = c;`) | Sem checagem de `i` |
+
+Guarde também **quais bytes cada função aceita**, porque isso limita o payload: 
+
+- `gets` e `read` aceitam bytes nulos (endereços de 64 bits passam inteiros)
+- `strcpy` para no primeiro `\0`
+- `scanf("%s")` para em espaços (`0x20`, `0x09` a `0x0d`).
+
+Se o tamanho lido respeita o buffer (`fgets(buf, sizeof(buf), stdin)`), não há como fazer Buffer Overflow.

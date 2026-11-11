@@ -3,66 +3,79 @@ title: Use-After-Free
 sidebar_position: 2
 ---
 
-Use-After-Free é uma vulnerabilidade onde um programa **continua usando um ponteiro para memória que já foi liberada** com `free()`.
+Use-After-Free (UAF) é usar um ponteiro depois de a memória ter sido liberada. O `free` devolve o chunk ao alocador, mas **não altera a variável que guarda o ponteiro**: ela continua apontando para o mesmo endereço (*dangling pointer*).
 
 ```c
-char *ptr = malloc(100);  // Aloca memória
-free(ptr);                // Libera a memória
-// ...
-strcpy(ptr, "data");      // ERRO: Usa ptr depois de free! ← USE-AFTER-FREE
+char *ptr = malloc(100);
+free(ptr);
+strcpy(ptr, "data");      // UAF: ptr ainda aponta para o chunk liberado
 ```
 
-Usar `free()` não muda o valor da variável `ptr` (ela continua guardando o mesmo endereço), apenas faz o alocador marcar o chunk como livre e colocá-lo em uma bin. Após isso, a memória pode ser reutilizada por outras alocações, e o próprio alocador escreve metadados (`fd`, `bk`, `key`) nos primeiros bytes dos dados.
+A correção é `ptr = NULL` depois do `free`, e é isso que os programas vulneráveis esquecem. O cenário típico em CTF é o desafio de "notas" (criar, editar, ver, apagar) em que o `delete` chama `free(notes[i])` sem zerar `notes[i]`, e `view`/`edit` continuam aceitando o índice.
 
-A correção é simples (`ptr = NULL` depois do `free`), e é justamente o que programas vulneráveis esquecem de fazer. Em CTFs, UAF aparece muito em desafios estilo "notes" (criar, editar, ver e deletar notas), em que o `delete` dá `free` mas não zera o ponteiro no array de notas, e `edit`/`view` continuam funcionando na nota deletada.
+## O que o ponteiro enxerga
 
-Podemos imaginar o UAF como um "portal mágico" para a heap, que nos permite espiar ou modificar a heap. Mesmo após o `free`, `ptr` continua apontando para o mesmo endereço.
+Depois do `free`, a memória apontada pode estar em dois estados, e cada um dá um tipo de ataque:
 
-## Leitura/Escrita
+<Side>
+  <Mem
+    title="1. O chunk está em uma bin"
+    cellW={230}
+    rows={[
+      {cells: [{label: 'prev_size', kind: 'meta'}, {label: 'size', kind: 'meta'}]},
+      {addr: 'ptr', cells: [{label: 'fd', kind: 'ptr'}, {label: 'bk / key', kind: 'ptr'}]},
+      {label: 'dados antigos', kind: 'free', h: 1.4},
+    ]}
+  />
+  <Mem
+    title="2. O chunk foi realocado para outro objeto"
+    cellW={230}
+    rows={[
+      {cells: [{label: 'prev_size', kind: 'meta'}, {label: 'size', kind: 'meta'}]},
+      {addr: 'ptr, novo', label: 'campos do objeto novo', kind: 'danger', h: 2.4},
+    ]}
+  />
+</Side>
 
-Podemos usar UAF para ler/escrever na heap.
+### 1. Metadados do alocador
+
+Enquanto o chunk está livre, os primeiros bytes dos dados são `fd`, `bk` e, no tcache, a `key`.
+
+| Primitiva | Efeito | Detalhes |
+|---|---|---|
+| **Leitura** (view após delete) | Vaza `fd`: endereço da **heap** (tcache/fastbin) ou da **libc** (unsorted bin) | [Safe Linking](./safe-linking.mdx), [Leak de libc](./malloc-consolidate.mdx) |
+| **Escrita** (edit após delete) | Sobrescreve `fd`: o `malloc` passa a devolver um endereço arbitrário | [Tcache Poisoning](./tcache.mdx#tcache-poisoning) |
+| **Escrita** na `key` | Desarma a detecção de double free do tcache | [Tcache keys](./tcache.mdx#tcache-keys-glibc-229) |
+| **`free` de novo** (delete após delete) | [Double Free](./double-free.mdx) | |
+
+### 2. Confusão entre objetos
+
+O alocador devolve o chunk liberado na próxima alocação de tamanho compatível. Se o programa aloca ali um objeto de **outro tipo**, os dois ponteiros (o pendurado e o novo) enxergam a mesma memória com interpretações diferentes:
 
 ```c
-// Aloca um buffer
-char *buffer = malloc(100);
-strcpy(buffer, "Dados importantes");
-
-// Libera o buffer
-free(buffer);  // Memória volta para o alocador
-
-// ERRO: Continua usando o ponteiro!
-
-// Leitura
-printf("Buffer: %s\n", buffer);  // Pode imprimir lixo ou dados de outra alocação
-
-// Escrita
-strcpy(buffer, "Novos dados");  // Pode sobrescrever estruturas do heap!
-```
-
-Na prática, isso vira:
-
-- **Leitura** de um chunk livre → vazar o `fd` (endereço da heap, ou da `libc` se o chunk estiver na unsorted bin. Veja [Vazando libc](./malloc-consolidate.mdx) e [Tcache](./tcache.mdx#libc-leak-com-tcache))
-- **Escrita** em um chunk livre → sobrescrever o `fd` e controlar o próximo `malloc` ([Tcache Poisoning](./tcache.mdx#tcache-poisoning) / [Double Free](./double-free.mdx)), ou sobrescrever a `key` para permitir double free
-
-## Execução
-
-Se existe código que tenta executar uma função alocada dinamicamente na heap, podemos colocar uma instrução qualquer no endereço apontado por `func` e em seguida isso será executado, por exemplo.
-
-```c
-// Se ptr apontava para uma função virtual (C++) ou callback
-struct Handler {
-    void (*func)();
-};
+struct Handler { void (*func)(); char name[24]; };   // 0x20 bytes
 
 struct Handler *h = malloc(sizeof(struct Handler));
-h->func = &original_function;
+h->func = original;
+free(h);                          // h continua apontando para o chunk
 
-free(h);  // Libera
+char *nota = malloc(0x20);        // mesmo tamanho: recebe o MESMO chunk
+read(0, nota, 0x20);              // escrevemos os 8 primeiros bytes
 
-// UAF: realoca e sobrescreve
-struct Handler *h2 = malloc(sizeof(struct Handler));
-h2->func = &malicious_function;
-
-// Se o código ainda usa h:
-h->func();  // Executa malicious_function!
+h->func();                        // executa o endereço que escrevemos
 ```
+
+Funciona nos dois sentidos: escrever pelo objeto novo e usar pelo antigo (como acima), ou ler pelo ponteiro antigo dados que o objeto novo guardou (ponteiros, segredos).
+
+Alvos comuns dentro do objeto: ponteiros de função, ponteiros para buffers (viram leitura/escrita arbitrária quando o programa os usa), campos de tamanho e, em C++, o ponteiro da vtable no início do objeto.
+
+Para o objeto novo cair no chunk certo:
+
+- Peça um tamanho que gere **o mesmo tamanho de chunk** do objeto liberado (veja a [tabela de conversão](./index.mdx#o-campo-size)).
+- Tcache e fastbin são LIFO: o último chunk liberado é o primeiro devolvido.
+- `calloc` zera a memória e, em glibc mais antigas, não tira chunks do tcache.
+
+## Identificando
+
+- No decompilador: um `free(x)` sem `x = NULL` em seguida, ou uma cópia do ponteiro que sobrevive ao `free` (outra struct, outra variável global).
+- Dinamicamente: apague um item e tente vê-lo ou editá-lo. No pwndbg, confira com `bins` se o chunk está na lista e com `x/4gx` o que há nele.

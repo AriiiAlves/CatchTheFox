@@ -3,92 +3,98 @@ title: Double Free
 sidebar_position: 3
 ---
 
-Um Double-free é bem simples.
+Double Free é liberar o mesmo chunk duas vezes. O chunk entra **duas vezes na mesma lista**. Ao alocar uma das cópias, ficamos com um chunk que está **alocado e livre ao mesmo tempo**: o que escrevemos nos dados dele é lido pelo alocador como o ponteiro `fd`. O resultado é um `malloc` que devolve um endereço arbitrário.
 
-Primeiro, lembre-se que para cada chunk na fastbin (ou no tcache), a localização do próximo chunk livre é dada pelo ponteiro `fd` do chunk atual. Se o chunk `a` está no topo da bin e `a->fd` aponta para `b`, então, depois que `a` for alocado de novo, `b` passa a ser o próximo chunk a ser entregue pelo `malloc`.
+O ataque descrito aqui é o clássico na fastbin (*fastbin dup*). No tcache a ideia é a mesma: veja [Tcache](./tcache.mdx).
 
-Em um double free, tentamos controlar `fd`. Sobrescrevendo isso com um endereço de memória arbitrário, podemos falar ao `malloc` onde o próximo chunk será alocado. Sim, podemos fazer o `malloc` considerar qualquer lugar da memória um chunk!
+## O ataque
 
-## Controlando fd
+`fd` de um chunk livre e os primeiros 8 bytes de dados de um chunk alocado são **a mesma posição de memória**.
 
-Para explorarmos um double-free, precisamos que o mesmo chunk seja liberado **duas vezes**.
+<Side>
+  <Mem
+    title="Visto pelo programa (alocado)"
+    cellW={220}
+    rows={[
+      {cells: [{label: 'prev_size', kind: 'meta'}, {label: 'size', kind: 'meta'}]},
+      {addr: 'a', label: 'dados[0..7]', kind: 'ctrl', note: 'escrevemos aqui'},
+      {label: 'dados...', kind: 'data'},
+    ]}
+  />
+  <Mem
+    title="Visto pelo alocador (livre)"
+    cellW={220}
+    rows={[
+      {cells: [{label: 'prev_size', kind: 'meta'}, {label: 'size', kind: 'meta'}]},
+      {addr: 'a', label: 'fd', kind: 'ctrl', note: 'próximo da lista'},
+      {label: '(não usado)', kind: 'free'},
+    ]}
+  />
+</Side>
 
-```c
-char *a = malloc(0x20);
-free(a);
-free(a);
-```
-
-Lembre-se que os chunks só vão para as bins após serem liberados. Abaixo temos uma simulação da fast bin.
-
-1. Antes do free: `HEAD`
-2. Depois do 1° free: `HEAD->a`
-3. Depois do 2° free: `HEAD->a->a`
-
-O que acontece agora se chamarmos `malloc()` para alocar um chunk do mesmo tamanho de `a` (que foi liberado)? Bom, como já conhecemos como as bins funcionam, isso quer dizer que o primeiro `a` colocado vai sair da fast bin e ser alocado. Porém, o outro `a` permanece.
-
-Assim, `a` está alocado e livre ao mesmo tempo (estranho).
-
-Caso você não se lembre, por questão de economia de memória, a heap coloca o ponteiro `fd` (para um chunk livre) onde normalmente os dados colocados pelo usuário estariam.
-
-<div style={{textAlign: 'center', fontSize: '0.8rem'}}>
-    ![Chunk alocado e chunk livre](/docs-img/free_and_allocated_chunk.png)
-    <p>Fonte: <a href="https://ir0nstone.gitbook.io/notes/binexp/heap/double-free" target="_blank">Ir0nstone</a></p>
-</div>
-
-Entendeu? Após um Double-Free, se recuperarmos exatamente o mesmo tamanho de chunk `a` que foi liberado duas vezes, e escrevermos 8 bytes quaisquer, estaremos escrevendo o `fd` que indica qual o próximo chunk a ser alocado.
-
-Agora, o próximo `malloc` vai retornar o endereço de `a` de novo. Isso não importa, queremos o próximo.
+A fastbin impede liberar duas vezes seguidas o chunk que está na cabeça da lista (veja [fasttop](#fasttop-double-free-check)), então libera-se outro chunk no meio:
 
 ```c
-malloc(0x20)                     // Apenas outro 'a'
-char *controlled = malloc(0x20); // A localização que queremos
+char *a = malloc(0x50);
+char *b = malloc(0x50);
+
+free(a);
+free(b);
+free(a);                     // double free: a está duas vezes na lista
+
+char *x = malloc(0x50);      // devolve a (que continua na lista)
+*(long *)x = alvo;           // escrito como dado, lido como fd
+malloc(0x50);                // devolve b
+malloc(0x50);                // devolve a de novo
+char *evil = malloc(0x50);   // devolve alvo + 0x10
 ```
 
-Boom, temos escrita arbitrária nesse endereço.
+<Chain
+  title="Fast bin de 0x60 durante o ataque"
+  steps={[
+    {label: 'free(a)', nodes: ['a']},
+    {label: 'free(b)', nodes: ['b', 'a']},
+    {label: 'free(a)', nodes: ['a', 'b', 'a'], tail: '...', note: 'ciclo a → b → a'},
+    {label: 'x = malloc', nodes: ['b', 'a'], tail: '...', note: 'devolve a'},
+    {label: '*x = alvo', nodes: ['b', 'a', {t: 'alvo', kind: 'ctrl'}], tail: '?', note: 'fd de a agora é alvo'},
+    {label: 'malloc', nodes: ['a', {t: 'alvo', kind: 'ctrl'}], tail: '?', note: 'devolve b'},
+    {label: 'malloc', nodes: [{t: 'alvo', kind: 'ctrl'}], tail: '?', note: 'devolve a'},
+    {label: 'malloc', nodes: [], tail: '?', note: 'devolve alvo: escrita arbitrária'},
+  ]}
+/>
 
-Em glibc ≥ 2.26, o mesmo ataque vale para o `tcache`, com duas diferenças: o `fd` aponta para o início dos **dados** do próximo chunk (não para o header), e, em glibc ≥ 2.32, ele é ofuscado pelo [Safe Linking](./safe-linking.mdx). Esse é o [Tcache Poisoning](./tcache.mdx#tcache-poisoning).
+Na fastbin, o `fd` aponta para o **header** do chunk. Para o `malloc` devolver o endereço `T`, o `fd` escrito deve ser `T - 0x10`.
 
 ## Passo a Passo
 
-1. Verificar se existe double free
-2. Fazer double free acontecer
-3. Alocar chunk do mesmo tamanho do que foi liberado
-4. Inserir payload (endereço para onde queremos ir) como dados no chunk que acabamos de alocar (`strcpy(b, "\x78\x56\x34\x12")`, por exemplo)
-5. Alocar outro chunk do mesmo tamanho. O ponteiro retornado para esse chunk alocado agora aponta para o endereço onde queríamos ir.
+1. Ache o double free: um `delete` que não zera o ponteiro e pode ser chamado duas vezes no mesmo índice.
+2. Garanta que os chunks caem na bin desejada. Em glibc ≥ 2.26, encha o tcache daquele tamanho primeiro (7 chunks liberados) para os seguintes irem à fastbin. Atenção na hora de alocar de volta: quando o `malloc` tira um chunk da fastbin, ele move os restantes para o tcache, o que muda a ordem das devoluções. Os exemplos `fastbin_dup*` do [how2heap](https://github.com/shellphish/how2heap) mostram a sequência exata para cada versão (em geral usando `calloc`).
+3. `free(a)`, `free(b)`, `free(a)`.
+4. Aloque do mesmo tamanho e escreva o endereço alvo nos primeiros 8 bytes.
+5. Aloque mais duas vezes (saem `b` e `a`).
+6. A alocação seguinte devolve o alvo. Escrever nela é escrever no alvo.
 
 ## Proteções
 
 ### Fasttop (Double Free check)
 
-É uma proteção bem simples e fácil de ser quebrada (existe na fastbin desde a glibc 2.3.x). Ela verifica: "o chunk que está no topo da bin é o mesmo sendo liberado?" Se for, aborta com `double free or corruption (fasttop)`.
-
-Mas basta liberar outro chunk entre o double free (técnica do chunk intermediário):
-
-```c
-#include <stdio.h>
-#include <stdlib.h>
-
-int main() {
-    int *a = malloc(0x50);
-    int *b = malloc(0x50);
-
-    free(a);
-    free(b); // Isso quebra o fluxo
-    free(a); // Ainda é um double free: a bin fica a -> b -> a
-    
-    return 1;
-}
-```
-
-Agora, `malloc(0x50)` devolve `a`; escrevemos o `fd` falso nele; `malloc(0x50)` devolve `b`; `malloc(0x50)` devolve `a` de novo; e o **quarto** `malloc(0x50)` devolve o endereço que escrevemos.
-
-(Em glibc ≥ 2.26, esses chunks iriam para o tcache, que não tem essa verificação até a 2.28 e usa a [tcache key](./tcache.mdx#tcache-keys-glibc-229) a partir da 2.29. Para cair na fastbin e no cenário acima, o tcache daquele tamanho precisa estar cheio: 7 chunks.)
+Ao liberar para a fastbin, o `free` confere só se o chunk é o mesmo que já está na cabeça da lista. Se for, aborta com `double free or corruption (fasttop)`. Não olha o resto da lista, por isso `free(a); free(b); free(a);` passa.
 
 ### Size Check (malloc)
 
-Essa proteção já é mais difícil de passar. Quando o `malloc` remove (aloca) um chunk da fastbin, irá ser verificado o campo `size` armazenado nos metadados do chunk para constar se corresponde ao tamanho esperado de um chunk da fastbin.
+Ao tirar um chunk da fastbin, o `malloc` confere se o `size` dele corresponde àquele bin. Para o chunk falso, isso significa que em `alvo + 8` precisa existir um valor com o tamanho certo (as flags são ignoradas). Caso contrário: `malloc(): memory corruption (fast)`.
 
-Supondo que redirecionamos `fd` para `0x12345678`, se em `0x12345678 + 8` (onde fica o `size` do chunk falso) não houver um valor que corresponda ao tamanho esperado daquela fastbin, temos `malloc(): memory corruption (fast)`.
+Isso restringe os alvos: é preciso achar (ou criar) um `size` válido perto do que queremos sobrescrever.
 
-Isso nos força a encontrar endereços-alvo onde os bytes pareçam metadados válidos. Truques comuns: apontar para `target - 0x10 + k`, de forma que algum valor já existente na memória (como um ponteiro `0x7f...` ou um inteiro pequeno) sirva de `size` quando lido desalinhado, ou escrever o `size` falso antes com outra primitiva. O exemplo clássico era `__malloc_hook - 0x23`, em que os bytes `0x7f` de um ponteiro vizinho formam um `size` de `0x7f` (fastbin de `0x70`). Note que o **tcache não faz essa verificação**, o que torna o Tcache Poisoning bem mais simples.
+- **Leitura desalinhada**: o alocador não exigia alinhamento na fastbin (até a glibc 2.31). Ponteiros da libc começam com o byte `0x7f`, e lidos com deslocamento viram um `size` de `0x7f`, aceito pelo bin de `0x70`. O alvo clássico era `__malloc_hook - 0x23`, com chunks de `malloc(0x68)`.
+- **Escrever o `size` antes**: com outra primitiva, grave um `size` falso ao lado do alvo.
+
+O tcache **não faz essa verificação**, e é por isso que o [Tcache Poisoning](./tcache.mdx#tcache-poisoning) é muito mais simples.
+
+### No tcache
+
+| glibc | Double free no tcache |
+|---|---|
+| 2.26 a 2.28 | Nenhuma verificação: `free(a); free(a);` funciona direto |
+| ≥ 2.29 | [Tcache key](./tcache.mdx#tcache-keys-glibc-229): aborta com `free(): double free detected in tcache 2`. Contorno: sobrescrever a `key` antes do segundo `free`, ou liberar uma vez para o tcache e outra para a fastbin/unsorted bin |
+| ≥ 2.32 | O `fd` escrito precisa ser ofuscado ([Safe Linking](./safe-linking.mdx)) |

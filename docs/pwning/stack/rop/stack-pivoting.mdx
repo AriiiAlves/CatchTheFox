@@ -3,82 +3,95 @@ title: Stack Pivoting
 sidebar_position: 2
 ---
 
-Às vezes não temos espaço suficiente na stack para colocar os gadgets ROP (stack limitada), ou a stack original está protegida.
+Uma [ROP chain](./index.mdx) precisa de espaço: cada gadget e cada argumento ocupa 8 bytes depois do endereço de retorno. Quando o overflow só alcança o `rbp` salvo e o endereço de retorno (ou pouco mais), a chain não cabe.
 
-A solução para isso é o stack pivoting: Vamos criar uma nova stack para usarmos os gadgets. Ou seja, mudamos para um lugar maior e mais livre onde temos mais espaço para trabalhar.
+Stack Pivoting resolve isso **movendo o `rsp` para outra região que controlamos**, onde a chain completa já está escrita. Como `ret` é `pop rip` e `pop` lê de `rsp`, a partir do momento em que `rsp` aponta para a nossa região, os próximos `ret` consomem a chain de lá.
 
-1. Alocamos memória em outro lugar (heap, .data, etc.). Precisamos `obter o endereço de uma região de memória controlável`.
-2. Encadeamos os gadgets na nova stack ([Gadget 1] → [Gadget 2] → [Gadget 3] → ...)
-3. Usamos um gadget que muda o registrador RSP para nossa nova stack (`mov rsp, rax` + `ret`) (stack pivoting!)
-4. A CPU agora usa nossa nova stack. 
-
-Lembre-se que o `ret` é uma instrução compacta que na verdade executa `pop rip`. E lembre-se que `pop` usa `rsp` como referência para fazer o "pop" de um elemento da stack. Assim, o `pop rip` pega o endereço para o qual `rsp` aponta e coloca no `rip`. Portanto, se fizermos `rsp` apontar para a nossa região de memória, o próximo `ret` continua a chain a partir de lá.
-
-O Stack Pivoting não contorna nenhuma proteção por si só (continua precisando de um leak se houver PIE/ASLR, e a chain continua sendo ROP por causa do NX). O que ele resolve é a **falta de espaço**: quando o overflow só permite sobrescrever o `return address` e mais um ou dois valores, movemos a stack para um lugar onde cabe a chain inteira.
-
-Resumindo: **Stack Pivoting = Redirecionar RSP/ESP para região controlada + ROP chain pré-montada**.
-
-## Encontrando a nova stack
-
-1. Heap (via malloc/free)
-2. Seção .data ou .bss
-3. Stack secundária (usando vazamento de endereço)
-4. Memória mapeada (mmap)
-
-## Gadgets comuns para pivoting
-
-```nasm
-# 1. Movimento direto
-mov rsp, rax ; ret        # Copia RAX para RSP
-xchg rsp, rax ; ret       # Troca RSP com RAX
-
-# 2. Aritmético (quando a chain está um pouco mais adiante na própria stack)
-add rsp, 0x100 ; ret      # Pula 0x100 bytes para frente
-sub rsp, 0x100 ; ret      # Volta 0x100 bytes
-
-# 3. Indireto
-push rax ; pop rsp ; ret  # Move RAX para RSP via push/pop
-
-# 4. O mais comum de todos: leave ; ret
-leave ; ret               # mov rsp, rbp ; pop rbp ; ret
-```
-
-Para o stack pivoting com `rax` funcionar, precisamos de um gadget `pop_rax` para colocar o endereço desejado em `rax`.
-
-```nasm
-[Buffer overflow...]
-[pop_rax_gadget]     ← RIP vai aqui primeiro (return address)
-[&nova_stack]        # Valor para RAX
-[mov_rsp_rax_gadget] # Gadget que faz pivot
-```
-
-## Pivot com `leave ; ret`
-
-Esse é o caso mais frequente em CTFs, porque **toda função que termina com `leave; ret` já é um gadget de pivot**, e porque o `RBP` salvo fica logo antes do `return address`, ou seja, o Buffer Overflow já o sobrescreve de graça.
-
-O `leave` faz `mov rsp, rbp ; pop rbp`. Então, se controlamos o `RBP` salvo, controlamos o `RSP` depois do próximo `leave`:
-
-```
-Stack após o overflow:
-[buffer...]
-[RBP salvo]      = &nova_stack          ← controlamos
-[return address] = endereço de "leave ; ret"
-
-Execução:
-1. leave da função vulnerável: rbp = &nova_stack (pop rbp pega o nosso valor)
-2. ret: pula para o gadget leave ; ret
-3. leave do gadget: rsp = rbp = &nova_stack ; pop rbp (consome os 8 primeiros bytes da nova stack)
-4. ret: pop rip = segundo valor da nova stack → nossa chain começa aqui!
-```
-
-Por isso a nova stack costuma começar com 8 bytes de lixo (que viram o `rbp`) seguidos da chain. Isso é exatamente o que o pwntools faz em `rop.chain()` quando pedimos um `rop.migrate(addr)`.
-
-Em 32 bits, é a mesma coisa com `ebp`/`esp` e 4 bytes.
+O pivot não contorna nenhuma proteção por si só: continua sendo ROP (por causa do NX) e continua precisando de endereços conhecidos (por causa de PIE/ASLR). Ele resolve só a falta de espaço.
 
 ## Onde colocar a chain
 
-A nova stack precisa estar em um endereço que conhecemos e onde conseguimos escrever:
+A região precisa ter **endereço conhecido** e ser **gravável por nós**:
 
-- **`.bss`/`.data`** (sem PIE): o endereço é fixo. Um `read(0, bss, 0x200)` feito com um pequeno ROP inicial (ou um `gets` sobre uma variável global) escreve a chain lá, e aí pivotamos
-- **Heap**: se o programa guarda nosso input na heap e vazou (ou podemos deduzir) o endereço
-- **A própria stack**: se o buffer é grande o suficiente mas está *antes* do `return address`, o pivot pode apontar `rsp` de volta para o início do buffer (precisa de um leak da stack ou de um gadget `sub rsp, N ; ret`)
+| Região | Quando serve |
+|---|---|
+| `.bss` / `.data` | Sem PIE (endereço fixo), ou com a base vazada. Preencha com um input em variável global ou com um `read(0, bss, n)` |
+| O próprio buffer na stack | Buffer grande, mas overflow curto. Requer leak da stack |
+| Heap | O programa guarda input na heap e o endereço foi vazado |
+
+Ao usar a `.bss`, aponte para o meio dela (`elf.bss() + 0x800`, por exemplo). As funções chamadas pela chain usam a stack para baixo do `rsp`, e logo abaixo da `.bss` ficam a GOT e páginas somente leitura.
+
+## Pivot com `leave; ret`
+
+É o mais comum, por dois motivos: toda função que termina em `leave; ret` já é o gadget, e o `rbp` salvo fica logo antes do endereço de retorno, então o overflow o sobrescreve de qualquer jeito.
+
+`leave` equivale a `mov rsp, rbp; pop rbp`. Quem controla `rbp` controla `rsp` no `leave` seguinte:
+
+<Side>
+  <Mem
+    title="Stack original após o overflow"
+    cellW={220}
+    rows={[
+      {label: 'padding', kind: 'neutral', h: 1.4},
+      {addr: 'rbp', label: '&nova_stack', kind: 'ctrl', note: 'rbp salvo'},
+      {addr: 'rbp+0x8', label: '&(leave; ret)', kind: 'danger', note: 'return address'},
+    ]}
+  />
+  <Mem
+    title="nova_stack (ex: .bss)"
+    cellW={220}
+    rows={[
+      {addr: '+0x0', label: 'lixo (8 bytes)', kind: 'neutral', note: 'vira rbp'},
+      {addr: '+0x8', label: 'gadget 1', kind: 'meta', note: 'a chain começa aqui'},
+      {addr: '+0x10', label: 'argumento', kind: 'data'},
+      {addr: '+0x18', label: 'gadget 2 ...', kind: 'meta'},
+    ]}
+  />
+</Side>
+
+| Passo | Instrução | Efeito |
+|---|---|---|
+| 1 | `leave` da função vulnerável | `rbp = &nova_stack` (o `pop rbp` pega o nosso valor) |
+| 2 | `ret` da função vulnerável | Pula para o gadget `leave; ret` |
+| 3 | `leave` do gadget | `rsp = rbp = &nova_stack`; o `pop rbp` consome os 8 primeiros bytes |
+| 4 | `ret` do gadget | `rip = [nova_stack + 8]`: primeiro gadget da chain |
+
+```py
+leave_ret = rop.find_gadget(['leave', 'ret'])[0]
+nova_stack = elf.bss() + 0x800
+
+# 1ª etapa: escrever a chain em nova_stack (aqui, supondo que o programa leia para lá)
+chain = p64(0)                          # vira rbp
+chain += p64(pop_rdi) + p64(elf.got['puts']) + p64(elf.plt['puts']) + p64(elf.sym['main'])
+p.send(chain)
+
+# 2ª etapa: overflow curto, só rbp salvo e return address
+p.send(b'A' * offset_ate_rbp + p64(nova_stack) + p64(leave_ret))
+```
+
+Em 32 bits é idêntico, com `ebp`/`esp` e 4 bytes.
+
+Quando a chain está no próprio buffer da stack e o endereço dele é conhecido, o mesmo truque funciona com `rbp salvo = &buffer`: o overflow de 16 bytes pivota para o início do input.
+
+## Outros gadgets de pivot
+
+```nasm
+pop rsp ; ret                 ; o valor seguinte da stack vira rsp
+xchg rsp, rax ; ret           ; quando rax aponta para dados controlados (retorno de read/malloc)
+mov rsp, rbx ; ret
+add rsp, 0x100 ; ret          ; a chain está mais adiante na mesma stack
+sub rsp, 0x100 ; ret          ; a chain está antes (no buffer)
+push rax ; pop rsp ; ret
+```
+
+Para os que usam um registrador, coloque antes o gadget que o carrega:
+
+```py
+payload = b'A' * offset + p64(pop_rax) + p64(nova_stack) + p64(xchg_rsp_rax)
+```
+
+O pwntools gera o pivot com `rop.migrate(endereco)`, escolhendo um desses gadgets.
+
+## Off-by-one no `rbp`
+
+Uma variação: um overflow de **um byte** que só atinge o byte baixo do `rbp` salvo. Esse `rbp` corrompido vira `rsp` no `leave` da função **chamadora**, deslocando a stack dela para dentro de uma região que controlamos (muitas vezes o próprio buffer, que está logo abaixo). É um pivot "de graça", sem tocar no endereço de retorno.

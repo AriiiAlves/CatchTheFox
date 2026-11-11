@@ -7,7 +7,7 @@ Uma sequência de De Bruijn de ordem `n` é uma sequência de letras/números em
 
 Podemos usar sequências de letras de De Bruijn para identificar offsets (quantos caracteres colocar de espaçamento até o endereço alvo) em Buffer Overflow. Isso facilita demais o processo de achar offsets.
 
-Imagine que queremos sobrescrever algo na memória, mas não sabemos o offset. Podemos simplesmente colocar uma sequência de De Bruijn de 200 letras e olhar o valor dentro do endereço alvo no GDB (Buffer Overflow sobrescreve a stack inteira). Mesmo que tenhamos passado do ponto onde queríamos chegar, a combinação de letras naquele endereço é única, e podemos identificar o offset numericamente.
+Imagine que queremos sobrescrever algo na memória, mas não sabemos o offset. Podemos simplesmente colocar uma sequência de De Bruijn de 200 letras e olhar o valor dentro do **endereço alvo** no GDB (Buffer Overflow sobrescreve a stack inteira). **Mesmo que tenhamos passado do ponto onde queríamos chegar, a combinação de letras naquele endereço é única, e podemos identificar o offset numericamente**.
 
 No pwntools, criamos essa sequência e identificamos o offset com o comando `cyclic`.
 
