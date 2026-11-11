@@ -31,6 +31,11 @@ sidebars.js               ← sidebar (gerada automaticamente, não precisa edit
 **O caminho do arquivo é o caminho da URL.** Por exemplo, a página
 `https://ariiialves.github.io/CatchTheFox/pwning/protections/` está em `docs/pwning/protections.mdx`.
 
+## Explicação das versões
+
+- `v1` - Até aqui, a Wiki era feita manualmente.
+- `v2` - A partir daqui, os conceitos e modo de escrita foram corrigidos/aperfeiçoados com uso de agentes da Anthropic. Algumas páginas começam a ser escritas, de modo guiado, por agentes também, pois verifiquei que a qualidade do conteúdo era boa. Então, por que não?
+
 ## Contribuindo
 
 Correções e novos artigos são muito bem-vindos! Você pode:
