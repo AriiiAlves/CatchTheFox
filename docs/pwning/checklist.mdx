@@ -7,22 +7,9 @@ description: Índice dos tópicos de pwning para CTFs, com o que já está dispo
 Mapa dos tópicos de pwning que aparecem em CTFs. Serve como índice do que já existe no site e como lista do que ainda falta escrever.
 
 - ✅ disponível (o nome é o link para a página)
-- 🟡 coberto só em parte, dentro de outra página
 - ⬜ ainda não escrito
 
 Quer escrever um dos que faltam? Veja como contribuir no [repositório](https://github.com/AriiiAlves/CatchTheFox#contribuindo).
-
-## Fundamentos
-
-| | Tópico | O que é |
-|:-:|---|---|
-| ✅ | [Proteções de binários](./protections.mdx) | RELRO, Canary, NX, PIE/ASLR, Fortify, CET, e o que cada uma bloqueia |
-| ✅ | [Convenção de chamada](../extra/call-convention.mdx) | Onde ficam argumentos e retorno em x86 e x86-64 |
-| ✅ | [pwntools](../introduction/pwntools.md) | Tubes, packing, `ELF`, `ROP`, `gdb.attach` |
-| ✅ | [GDB / pwndbg](../introduction/gdb.md) | Debug de exploits |
-| 🟡 | Rodar o binário com a libc do desafio | `pwninit`, `patchelf`, Docker do desafio. Citado em [Versões da glibc](./heap/glibc-versions.mdx) |
-| ⬜ | Identificar a libc remota | `libc.rip`, libc-database, leak de dois símbolos |
-| ⬜ | Diferenças local × remoto | Buffering, `socat`, offsets de ambiente, timeouts |
 
 ## Stack
 
@@ -33,7 +20,6 @@ Quer escrever um dos que faltam? Veja como contribuir no [repositório](https://
 | ✅ | [BOF: return address (ret2win)](./stack/buffer-overflow/return-address.md) | Desviar o fluxo para uma função existente; alinhamento da stack |
 | ✅ | [BOF: shellcode](./stack/buffer-overflow/shellcode.md) | Injetar e executar código (NX desligado) |
 | ✅ | [Sequências de De Bruijn](./stack/buffer-overflow/debruijn.mdx) | Achar offsets com `cyclic` |
-| 🟡 | Bypass de Canary | Leak (format string, `\0` sobrescrito), brute force byte a byte em `fork`. Citado em [Proteções](./protections.mdx) |
 | ⬜ | Off-by-one na stack | Sobrescrever 1 byte do `rbp` salvo e pivotar no `leave` seguinte |
 | ⬜ | Variáveis não inicializadas | Reaproveitar lixo de frames anteriores para leak ou controle |
 | ⬜ | Sobrescrita do master canary (TLS) | Overflow em thread alcança o canary de referência em `fs:0x28` |
@@ -57,7 +43,6 @@ Quer escrever um dos que faltam? Veja como contribuir no [repositório](https://
 | ✅ | [Partial Overwrite](./stack/rop/partial-overwrite.mdx) | Trocar só os bytes baixos de um endereço para contornar PIE/ASLR |
 | ✅ | [Stack Pivoting](./stack/rop/stack-pivoting.mdx) | Mover `rsp` para uma região controlada (`leave; ret`) |
 | ✅ | [SIGROP (SROP)](./stack/rop/sigrop.mdx) | `sigreturn` com frame forjado para controlar todos os registradores |
-| 🟡 | one_gadget | Endereço na libc que abre shell sem argumentos. Citado em [ROP](./stack/rop/index.mdx) |
 | ⬜ | ret2csu | Gadgets de `__libc_csu_init` para controlar `rdx`/`rsi`/`edi` (glibc < 2.34) |
 | ⬜ | ret2dlresolve | Forjar estruturas de relocação para o `ld.so` resolver `system` sem leak |
 | ⬜ | ORW (open-read-write) | Chain ou shellcode para ler a flag quando `execve` é bloqueado por seccomp |
